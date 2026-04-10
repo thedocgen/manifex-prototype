@@ -20,6 +20,10 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     const res = await fetch(`/api/manifex/sessions/${id}`);
     const data = await res.json();
     if (data.session) setSession(data.session);
+    if (data.inlined_html) {
+      setPreviewHtml(data.inlined_html);
+      setRenderedAt(new Date());
+    }
   };
 
   useEffect(() => { load(); }, [id]);
@@ -35,7 +39,24 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
     setToast({ kind, msg });
   };
 
-  const action = async (path: string, body?: any, opts: { statusKind?: StatusKind; statusMsg?: string; successMsg?: string } = {}) => {
+  // Background render: fetch the new compilation without changing status spinners.
+  // Used after Keep / Undo / Redo to keep the preview pane in sync without
+  // making the user wait or click Render manually.
+  const renderInBackground = async () => {
+    try {
+      const res = await fetch(`/api/manifex/sessions/${id}/render`, { method: 'POST' });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.inlined_html) {
+        setPreviewHtml(data.inlined_html);
+        setRenderedAt(new Date());
+      }
+    } catch {
+      // Silent — background only
+    }
+  };
+
+  const action = async (path: string, body?: any, opts: { statusKind?: StatusKind; statusMsg?: string; successMsg?: string; autoRender?: boolean } = {}) => {
     setStatus(opts.statusKind || 'thinking');
     setStatusMsg(opts.statusMsg || 'Working…');
     try {
@@ -51,6 +72,10 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
         return data;
       }
       if (opts.successMsg) showToast('success', opts.successMsg);
+      // After certain actions, fire a background render to keep preview in sync
+      if (opts.autoRender) {
+        renderInBackground();
+      }
       return data;
     } catch (e: any) {
       showToast('error', e.message || 'Network error');
@@ -279,7 +304,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
           <div style={{ display: 'flex', gap: '6px' }}>
             <button
               data-testid="undo-btn"
-              onClick={() => action('/undo', undefined, { statusMsg: 'Undoing…' })}
+              onClick={() => action('/undo', undefined, { statusMsg: 'Undoing…', autoRender: true })}
               disabled={busy || session.history.length === 0}
               className="mx-btn mx-btn-ghost"
               title="Undo last accepted edit"
@@ -288,7 +313,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
             </button>
             <button
               data-testid="redo-btn"
-              onClick={() => action('/redo', undefined, { statusMsg: 'Redoing…' })}
+              onClick={() => action('/redo', undefined, { statusMsg: 'Redoing…', autoRender: true })}
               disabled={busy || session.redo_stack.length === 0}
               className="mx-btn mx-btn-ghost"
               title="Redo"
@@ -301,7 +326,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
           <div style={{ display: 'flex', gap: '8px' }}>
             <button
               data-testid="keep-btn"
-              onClick={() => action('/keep', undefined, { successMsg: 'Kept' })}
+              onClick={() => action('/keep', undefined, { successMsg: 'Kept', autoRender: true })}
               disabled={busy || !pending}
               className="mx-btn mx-btn-success"
             >
