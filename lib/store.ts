@@ -150,6 +150,53 @@ export async function updateSession(id: string, patch: Partial<ManifexSession>):
   return rowToSession(data);
 }
 
+// ────────────────────────────────────────────────────────────
+// Compilation cache
+// ────────────────────────────────────────────────────────────
+
+import type { CompiledCodex } from './types';
+
+export async function getCachedCompilation(
+  manifestSha: string,
+  compilerVersion: string
+): Promise<CompiledCodex | null> {
+  const { data, error } = await client()
+    .from('manifex_compilations')
+    .select('codex_files, manifest_sha')
+    .eq('manifest_sha', manifestSha)
+    .eq('compiler_version', compilerVersion)
+    .maybeSingle();
+  if (error) {
+    console.warn('getCachedCompilation error:', error.message);
+    return null;
+  }
+  if (!data) return null;
+  const files = data.codex_files;
+  // Reconstruct CompiledCodex shape
+  return {
+    files,
+    codex_sha: manifestSha, // we use manifest_sha as the cache key
+    compiler_version: compilerVersion,
+  };
+}
+
+export async function putCachedCompilation(
+  manifestSha: string,
+  compilerVersion: string,
+  compiled: CompiledCodex
+): Promise<void> {
+  const { error } = await client()
+    .from('manifex_compilations')
+    .upsert({
+      manifest_sha: manifestSha,
+      compiler_version: compilerVersion,
+      codex_files: compiled.files,
+    });
+  if (error) {
+    console.warn('putCachedCompilation error:', error.message);
+  }
+}
+
 function rowToSession(row: any): ManifexSession {
   return {
     id: row.id,

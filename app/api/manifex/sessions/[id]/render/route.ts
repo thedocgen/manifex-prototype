@@ -1,23 +1,31 @@
 import { NextResponse } from 'next/server';
-import { getSession } from '@/lib/store';
+import { getSession, getCachedCompilation, putCachedCompilation } from '@/lib/store';
 import { compileManifestToCodex } from '@/lib/modal';
+import { inlineCodex } from '@/lib/codex';
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
-  const compiled = await compileManifestToCodex(session.manifest_state.content);
+  const COMPILER_VERSION = 'manifex-claude-sonnet-4-v1';
+  const manifestSha = session.manifest_state.sha;
 
-  const { 'index.html': html, 'styles.css': css, 'app.js': js } = compiled.files;
-  const inlined = html
-    .replace('<link rel="stylesheet" href="styles.css" />', `<style>${css}</style>`)
-    .replace('<link rel="stylesheet" href="styles.css">', `<style>${css}</style>`)
-    .replace('<script src="app.js"></script>', `<script>${js}</script>`);
+  // Check cache
+  let compiled = await getCachedCompilation(manifestSha, COMPILER_VERSION);
+  if (compiled) {
+    console.log(`[render] cache HIT for sha ${manifestSha.slice(0, 12)}`);
+  } else {
+    console.log(`[render] cache MISS for sha ${manifestSha.slice(0, 12)}, compiling…`);
+    compiled = await compileManifestToCodex(session.manifest_state.content);
+    await putCachedCompilation(manifestSha, COMPILER_VERSION, compiled);
+  }
+
+  const inlined = inlineCodex(compiled.files);
 
   return NextResponse.json({
     codex: compiled,
     inlined_html: inlined,
-    manifest_sha: session.manifest_state.sha,
+    manifest_sha: manifestSha,
   });
 }

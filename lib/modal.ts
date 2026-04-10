@@ -77,49 +77,58 @@ export async function editManifest(
   return { new_manifest, diff_summary };
 }
 
+// Use Anthropic tool-use mode for guaranteed structured output instead of JSON-mode
+// (which can truncate with raw max_tokens limits and produce unparseable strings)
 export async function compileManifestToCodex(manifest: string): Promise<CompiledCodex> {
   const resp = await client().messages.create({
     model: MODEL,
-    max_tokens: 8192,
+    max_tokens: 16000,
     temperature: 0,
     system: COMPILE_SYSTEM,
+    tools: [
+      {
+        name: 'emit_codex',
+        description: 'Emit the compiled codex as three files.',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            index_html: { type: 'string' as const, description: 'Complete HTML5 document. Reference styles.css via <link> and app.js via <script>.' },
+            styles_css: { type: 'string' as const, description: 'CSS for the app.' },
+            app_js: { type: 'string' as const, description: 'Vanilla JavaScript (no frameworks).' },
+          },
+          required: ['index_html', 'styles_css', 'app_js'],
+        },
+      },
+    ],
+    tool_choice: { type: 'tool', name: 'emit_codex' },
     messages: [
       {
         role: 'user',
-        content: `MANIFEST:\n\n${manifest}\n\nReturn the JSON object with index.html, styles.css, app.js.`,
+        content: `MANIFEST:\n\n${manifest}\n\nCall the emit_codex tool with the three files.`,
       },
     ],
   });
 
-  const textBlock = resp.content.find(b => b.type === 'text');
-  if (!textBlock || textBlock.type !== 'text') {
-    throw new Error('LLM returned no text content');
+  // Find the tool_use block
+  const toolUse = resp.content.find(b => b.type === 'tool_use');
+  if (!toolUse || toolUse.type !== 'tool_use') {
+    throw new Error('LLM did not call the emit_codex tool');
   }
 
-  // Parse JSON — strip code fences if present
-  let raw = textBlock.text.trim();
-  if (raw.startsWith('```')) {
-    raw = raw.replace(/^```(?:json)?\s*\n/, '').replace(/\n```\s*$/, '');
+  const input = toolUse.input as { index_html?: string; styles_css?: string; app_js?: string };
+  if (!input.index_html || !input.styles_css || !input.app_js) {
+    throw new Error(`Compiler tool input missing keys. Got: ${Object.keys(input).join(', ')}`);
   }
 
-  let files: any;
-  try {
-    files = JSON.parse(raw);
-  } catch (e) {
-    throw new Error(`Failed to parse compiler JSON: ${(e as Error).message}\nRaw: ${raw.slice(0, 200)}`);
-  }
-
-  if (!files['index.html'] || !files['styles.css'] || !files['app.js']) {
-    throw new Error(`Compiler JSON missing required keys. Got: ${Object.keys(files).join(', ')}`);
-  }
+  const files = {
+    'index.html': input.index_html,
+    'styles.css': input.styles_css,
+    'app.js': input.app_js,
+  };
 
   const codex_sha = sha256(JSON.stringify(files));
   return {
-    files: {
-      'index.html': files['index.html'],
-      'styles.css': files['styles.css'],
-      'app.js': files['app.js'],
-    },
+    files,
     codex_sha,
     compiler_version: COMPILER_VERSION,
   };
