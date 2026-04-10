@@ -184,7 +184,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* Doc viewer (60%) */}
         <div data-testid="doc-viewer" style={{
-          flex: '0 0 60%',
+          flex: '0 0 50%',
           padding: '40px 56px',
           overflow: 'auto',
           borderRight: '1px solid var(--border)',
@@ -211,7 +211,7 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
 
         {/* Preview pane (40%) */}
         <div data-testid="preview-pane" style={{
-          flex: '0 0 40%',
+          flex: '0 0 50%',
           display: 'flex',
           flexDirection: 'column',
           background: 'var(--bg-elev)',
@@ -228,7 +228,36 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
             letterSpacing: '0.05em',
           }}>
             <span>Preview</span>
-            {renderedAt && <span>Last rendered {renderedAgo}</span>}
+            <span style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              {renderedAt && <span>Last rendered {renderedAgo}</span>}
+              {previewHtml && (
+                <button
+                  data-testid="breakout-btn"
+                  onClick={() => {
+                    const w = window.open('', '_blank');
+                    if (w) {
+                      w.document.open();
+                      w.document.write(previewHtml);
+                      w.document.close();
+                    }
+                  }}
+                  style={{
+                    background: 'transparent',
+                    border: '1px solid var(--border-strong)',
+                    color: 'var(--text-muted)',
+                    padding: '4px 10px',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    cursor: 'pointer',
+                  }}
+                  title="Open the rendered app in a new tab"
+                >
+                  ↗ Open in new tab
+                </button>
+              )}
+            </span>
           </div>
           <div style={{ flex: 1, background: '#fff', position: 'relative' }}>
             {status === 'compiling' && (
