@@ -1,17 +1,21 @@
 import { NextResponse } from 'next/server';
-import { store } from '@/lib/store';
+import { getSession, updateSession } from '@/lib/store';
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const session = store.sessions.get(id);
+  const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'not found' }, { status: 404 });
   if (session.redo_stack.length === 0) return NextResponse.json({ error: 'nothing to redo' }, { status: 400 });
 
-  const next = session.redo_stack.pop()!;
-  session.history.push(session.manifest_state);
-  session.manifest_state = next;
-  session.updated_at = new Date().toISOString();
-  store.sessions.set(id, session);
+  const newRedo = [...session.redo_stack];
+  const next = newRedo.pop()!;
+  const newHistory = [...session.history, session.manifest_state];
 
-  return NextResponse.json({ session });
+  const updated = await updateSession(id, {
+    history: newHistory,
+    redo_stack: newRedo,
+    manifest_state: next,
+  });
+
+  return NextResponse.json({ session: updated });
 }

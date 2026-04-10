@@ -1,16 +1,15 @@
 import { NextResponse } from 'next/server';
-import { store } from '@/lib/store';
+import { getSession, getProject } from '@/lib/store';
 import { commitFiles } from '@/lib/github';
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const session = store.sessions.get(id);
+  const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
-  const project = store.projects.get(session.project_id);
+  const project = await getProject(session.project_id);
   if (!project) return NextResponse.json({ error: 'project not found' }, { status: 404 });
 
-  // Repo: use env override or project's stored repo (which is a placeholder for prototype)
   const repo = process.env.MANIFEX_GITHUB_REPO || project.github_repo;
   if (!repo || repo.startsWith('local/')) {
     return NextResponse.json({

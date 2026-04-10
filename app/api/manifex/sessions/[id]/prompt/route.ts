@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
-import { store, makeManifestState } from '@/lib/store';
+import { getSession, updateSession, makeManifestState } from '@/lib/store';
 import { editManifest } from '@/lib/modal';
 
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const session = store.sessions.get(id);
+  const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
   const body = await req.json().catch(() => ({}));
@@ -14,14 +14,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const result = await editManifest(session.manifest_state.content, prompt);
   const proposed = makeManifestState(result.new_manifest);
 
-  session.pending_attempt = {
-    prompt,
-    proposed_manifest: proposed,
-    diff_summary: result.diff_summary,
-    attempt_number: 1,
-  };
-  session.updated_at = new Date().toISOString();
-  store.sessions.set(id, session);
+  const updated = await updateSession(id, {
+    pending_attempt: {
+      prompt,
+      proposed_manifest: proposed,
+      diff_summary: result.diff_summary,
+      attempt_number: 1,
+    },
+  });
 
-  return NextResponse.json({ session });
+  return NextResponse.json({ session: updated });
 }
