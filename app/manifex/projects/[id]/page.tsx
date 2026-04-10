@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, use } from 'react';
 import { useRouter } from 'next/navigation';
+import { Brand } from '@/components/Brand';
 import type { ManifexProject } from '@/lib/types';
 
 export default function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
@@ -20,40 +21,53 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     try {
       const res = await fetch(`/api/manifex/projects/${id}/sessions`, { method: 'POST' });
       const data = await res.json();
-      if (data.session) {
-        router.push(`/manifex/sessions/${data.session.id}`);
-      }
+      if (data.session) router.push(`/manifex/sessions/${data.session.id}`);
     } finally {
       setStarting(false);
     }
   };
 
-  if (!project) return <main style={{ padding: '2rem' }}>Loading...</main>;
-
   return (
-    <main style={{ padding: '2rem', maxWidth: '900px', margin: '0 auto' }}>
-      <button
-        onClick={() => router.push('/manifex/projects')}
-        style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', marginBottom: '1rem' }}
-      >
-        ← Back to projects
-      </button>
-      <h1 style={{ fontSize: '2rem', margin: '0 0 0.5rem' }}>{project.name}</h1>
-      <p style={{ color: '#666', margin: '0 0 2rem' }}>{project.github_repo}</p>
+    <div>
+      <Brand />
+      <main style={{ maxWidth: '720px', margin: '0 auto', padding: '48px 32px' }}>
+        <button
+          onClick={() => router.push('/manifex/projects')}
+          className="mx-btn mx-btn-ghost"
+          style={{ marginBottom: '24px', padding: '6px 12px' }}
+        >
+          ← Back to projects
+        </button>
 
-      <button
-        data-testid="start-session-btn"
-        onClick={startSession}
-        disabled={starting}
-        style={{
-          padding: '0.75rem 1.5rem',
-          background: '#3b82f6',
-          color: 'white', border: 'none', borderRadius: '8px',
-          cursor: 'pointer', fontWeight: 500,
-        }}
-      >
-        {starting ? 'Starting...' : 'Start Session →'}
-      </button>
-    </main>
+        {!project ? (
+          <p style={{ color: 'var(--text-muted)' }}>Loading…</p>
+        ) : (
+          <>
+            <h1 style={{
+              fontFamily: 'var(--font-serif)',
+              fontSize: '40px',
+              fontWeight: 600,
+              letterSpacing: '-0.02em',
+              margin: '0 0 8px',
+            }}>{project.name}</h1>
+            <p style={{
+              fontStyle: 'italic',
+              color: 'var(--text-muted)',
+              margin: '0 0 32px',
+            }}>{project.github_repo}</p>
+
+            <button
+              data-testid="start-session-btn"
+              onClick={startSession}
+              disabled={starting}
+              className="mx-btn mx-btn-primary"
+              style={{ padding: '14px 28px', fontSize: '16px' }}
+            >
+              {starting ? <><span className="mx-spinner" /> Starting…</> : 'Start Session →'}
+            </button>
+          </>
+        )}
+      </main>
+    </div>
   );
 }

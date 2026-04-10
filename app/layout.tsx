@@ -1,20 +1,14 @@
+import './globals.css';
+
 export const metadata = {
-  title: 'Manifex',
-  description: 'Doc-first AI development',
+  title: 'Manifex — Documentation as Code',
+  description: 'Doc-first AI development. Write what you want — get a working app.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body style={{
-        margin: 0,
-        fontFamily: 'system-ui, -apple-system, sans-serif',
-        backgroundColor: '#0a0a0a',
-        color: '#e5e5e5',
-        minHeight: '100vh',
-      }}>
-        {children}
-      </body>
+      <body>{children}</body>
     </html>
   );
 }
