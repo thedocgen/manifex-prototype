@@ -1,21 +1,37 @@
-# Todo List App
+# Recipe Collection
 
 ## Overview
-A simple todo list application that allows users to add new tasks and delete completed ones.
+A recipe collection app where users can save their favorite recipes and browse them anytime. Each recipe includes a title, ingredients list, cooking instructions, optional notes, and a star rating.
 
 ## Pages
-- Home page displaying the todo list
-  - Input field for entering new todo items
-  - Add button to submit new todos
-  - List of current todo items
-  - Each todo item has a delete button next to it
-  - Clear all button to remove all todos at once
-  - Empty state message when no todos exist
+
+### Home Page
+The main page displays all saved recipes in a grid layout. Each recipe card shows the recipe title, star rating, and a brief preview. Users can click on any recipe card to view the full details. At the top of the page is an "Add New Recipe" button that opens the recipe creation form.
+
+### Recipe Detail Page
+Shows the complete recipe including:
+- Recipe title at the top
+- Star rating display (1-5 stars)
+- Full ingredients list with quantities
+- Step-by-step cooking instructions
+- Optional notes section for tips or variations
+- Edit and Delete buttons for managing the recipe
+- Back button to return to the home page
+
+### Add/Edit Recipe Page
+A form for creating new recipes or editing existing ones with fields for:
+- Recipe title (required)
+- Rating (star selector, 1-5 stars)
+- Ingredients (textarea for list entry)
+- Instructions (textarea for step-by-step directions)
+- Notes (optional textarea)
+- Save and Cancel buttons
 
 ## Styles
-- Clean, modern design with system fonts
-- Light background, dark text
-- Todo items displayed as a vertical list with clear spacing
-- Delete buttons aligned to the right of each item
-- Input field and add button grouped together at the top
-- Clear all button positioned below the todo list
+- Warm, inviting color scheme with cream backgrounds and earthy accent colors
+- Recipe cards have subtle shadows and rounded corners
+- Star ratings use a warm gold or amber color
+- Clear typography with larger headings for recipe titles
+- Ingredients and instructions use easy-to-read list formatting
+- Responsive layout that works on mobile and desktop
+- Buttons use warm accent colors that complement the overall design
