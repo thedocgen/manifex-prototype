@@ -116,7 +116,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
       {/* Top bar */}
-      <header style={{
+      <header className="build-header" style={{
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
@@ -156,9 +156,9 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       </header>
 
       {/* Main content area */}
-      <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
+      <div className="build-main" style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* App preview (main hero area) */}
-        <div data-testid="preview-pane" style={{
+        <div data-testid="preview-pane" className="build-preview" style={{
           flex: showDescription ? '0 0 50%' : '1 1 100%',
           display: 'flex',
           flexDirection: 'column',
@@ -253,9 +253,9 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           </div>
         </div>
 
-        {/* Description panel (hidden by default) */}
+        {/* Description panel (hidden by default, overlay on mobile) */}
         {showDescription && (
-          <div data-testid="doc-viewer" style={{
+          <div data-testid="doc-viewer" className="build-description-panel" style={{
             flex: '0 0 50%',
             padding: '40px 56px',
             overflow: 'auto',
@@ -264,6 +264,26 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             opacity: status === 'thinking' ? 0.6 : 1,
             transition: 'opacity 0.2s ease',
           }}>
+            <button
+              className="build-description-close"
+              onClick={() => setShowDescription(false)}
+              style={{
+                display: 'none',
+                position: 'absolute',
+                top: '16px',
+                right: '16px',
+                background: 'var(--bg-card)',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                padding: '8px 12px',
+                fontSize: '14px',
+                cursor: 'pointer',
+                color: 'var(--text)',
+                zIndex: 51,
+              }}
+            >
+              Close
+            </button>
             <Markdown content={displayContent} diffAgainst={baseForDiff} />
             {pending && pending.diff_summary && (
               <div data-testid="diff-summary" style={{
@@ -285,7 +305,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
 
       {/* Suggested change bar (when pending) */}
       {pending && (
-        <div style={{
+        <div className="build-suggested-bar" style={{
           borderTop: '1px solid var(--border)',
           background: 'var(--bg-elev)',
           padding: '12px 32px',
@@ -326,7 +346,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       )}
 
       {/* Bottom prompt bar */}
-      <footer style={{
+      <footer className="build-footer" style={{
         borderTop: '1px solid var(--border)',
         background: 'var(--bg-elev)',
         padding: '16px 32px',

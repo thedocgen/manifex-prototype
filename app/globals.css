@@ -326,3 +326,86 @@ input:focus, textarea:focus {
   margin: 0;
   font-size: 15px;
 }
+
+/* ─── Mobile responsive ───────────────────────────────── */
+@media (max-width: 768px) {
+  .mx-brand {
+    padding: 16px 20px;
+  }
+  .mx-brand-mark {
+    font-size: 22px;
+  }
+
+  .mx-btn {
+    padding: 8px 14px;
+    font-size: 13px;
+    border-radius: 10px;
+  }
+
+  .mx-card {
+    padding: 16px 20px;
+    border-radius: 12px;
+  }
+
+  .mx-md h1 { font-size: 24px; }
+  .mx-md h2 { font-size: 18px; }
+
+  .mx-toast {
+    left: 16px;
+    right: 16px;
+    transform: none;
+    bottom: 16px;
+  }
+  @keyframes slide-up {
+    from { transform: translateY(20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
+  }
+  @keyframes fade-out {
+    to { opacity: 0; transform: translateY(-10px); }
+  }
+
+  .mx-empty {
+    padding: 48px 16px;
+  }
+  .mx-empty h2 {
+    font-size: 22px;
+  }
+}
+
+/* ─── Build editor mobile ─────────────────────────────── */
+@media (max-width: 768px) {
+  .build-header {
+    padding: 10px 16px !important;
+  }
+  .build-main {
+    flex-direction: column !important;
+  }
+  .build-preview {
+    flex: 1 1 100% !important;
+    min-height: 50vh;
+  }
+  .build-description-panel {
+    position: fixed !important;
+    inset: 0 !important;
+    z-index: 50;
+    flex: none !important;
+    border-left: none !important;
+    animation: slide-in-right 0.3s ease;
+  }
+  .build-description-close {
+    display: block !important;
+  }
+  .build-footer {
+    padding: 12px 16px !important;
+  }
+  .build-suggested-bar {
+    padding: 10px 16px !important;
+    flex-direction: column !important;
+    gap: 8px !important;
+  }
+}
+
+@keyframes slide-in-right {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
