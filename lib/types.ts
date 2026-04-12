@@ -37,6 +37,22 @@ export interface ManifexProject {
   created_at: string;
 }
 
+// ── Conversation model ──
+
+export interface Question {
+  id: string;
+  text: string;
+  type: 'choice' | 'text' | 'secret';
+  options?: string[]; // for choice type
+}
+
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  questions?: Question[];
+  timestamp: string;
+}
+
 export interface ManifexSession {
   id: string;
   project_id: string;
@@ -46,6 +62,7 @@ export interface ManifexSession {
   history: ManifestState[];
   redo_stack: ManifestState[];
   pending_attempt: PendingAttempt | null;
+  conversation: ConversationMessage[];
   created_at: string;
   updated_at: string;
 }

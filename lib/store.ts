@@ -154,6 +154,7 @@ export async function updateSession(id: string, patch: Partial<ManifexSession>):
   if ('history' in patch) update.history = patch.history;
   if ('redo_stack' in patch) update.redo_stack = patch.redo_stack;
   if ('pending_attempt' in patch) update.pending_attempt = patch.pending_attempt;
+  if ('conversation' in patch) update.conversation = patch.conversation;
 
   const { data, error } = await client()
     .from('manifex_sessions')
@@ -209,6 +210,26 @@ export async function putCachedCompilation(
 }
 
 // ────────────────────────────────────────────────────────────
+// Secrets
+// ────────────────────────────────────────────────────────────
+
+export async function getSecrets(projectId: string): Promise<{ [key: string]: string }> {
+  const { data, error } = await client()
+    .from('manifex_secrets')
+    .select('key, value')
+    .eq('project_id', projectId);
+  if (error) {
+    console.warn('getSecrets error:', error.message);
+    return {};
+  }
+  const result: { [key: string]: string } = {};
+  for (const row of (data || [])) {
+    result[row.key] = row.value;
+  }
+  return result;
+}
+
+// ────────────────────────────────────────────────────────────
 // Row mappers (with migration)
 // ────────────────────────────────────────────────────────────
 
@@ -234,6 +255,7 @@ function rowToSession(row: any): ManifexSession {
     history,
     redo_stack,
     pending_attempt,
+    conversation: row.conversation || [],
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

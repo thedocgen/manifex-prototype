@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getSession, getCachedCompilation, putCachedCompilation } from '@/lib/store';
+import { getSession, getCachedCompilation, putCachedCompilation, getSecrets } from '@/lib/store';
 import { compileManifestToCodex } from '@/lib/modal';
 import { inlineCodex } from '@/lib/codex';
 
@@ -17,7 +17,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     console.log(`[render] cache HIT for sha ${manifestSha.slice(0, 12)}`);
   } else {
     console.log(`[render] cache MISS for sha ${manifestSha.slice(0, 12)}, compiling…`);
-    compiled = await compileManifestToCodex(session.manifest_state);
+    // Fetch project secrets for injection
+    const secrets = await getSecrets(session.project_id);
+    compiled = await compileManifestToCodex(session.manifest_state, Object.keys(secrets).length > 0 ? secrets : undefined);
     await putCachedCompilation(manifestSha, COMPILER_VERSION, compiled);
   }
 

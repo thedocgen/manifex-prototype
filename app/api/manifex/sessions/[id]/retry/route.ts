@@ -11,14 +11,20 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const prompt = session.pending_attempt.prompt;
   const attemptNum = session.pending_attempt.attempt_number + 1;
 
-  const result = await editManifest(session.manifest_state, prompt, { variation: true });
+  const response = await editManifest(session.manifest_state, prompt, { variation: true });
+
+  // Retry always forces an update (no questions on retry)
+  if (response.type === 'question') {
+    // If LLM asks on retry, just re-run with the original approach
+    return NextResponse.json({ error: 'retry produced question instead of update' }, { status: 500 });
+  }
 
   const updated = await updateSession(id, {
     pending_attempt: {
       prompt,
-      proposed_manifest: makeManifestState(result.pages, result.tree),
-      diff_summary: result.diff_summary,
-      changed_pages: result.changed_pages,
+      proposed_manifest: makeManifestState(response.result.pages, response.result.tree),
+      diff_summary: response.result.diff_summary,
+      changed_pages: response.result.changed_pages,
       attempt_number: attemptNum,
     },
   });
