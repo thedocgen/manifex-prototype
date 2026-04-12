@@ -1,29 +1,29 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&display=swap');
 
 :root {
-  --bg: #0a0a0b;
-  --bg-elev: #131316;
-  --bg-card: #18181c;
-  --border: #26262b;
-  --border-strong: #3a3a42;
-  --text: #f5f5f7;
-  --text-muted: #9ca3af;
-  --text-dim: #6b7280;
-  --accent: #06b6d4;
-  --accent-hover: #22d3ee;
-  --accent-soft: rgba(6, 182, 212, 0.1);
+  --bg: #fafaf7;
+  --bg-elev: #ffffff;
+  --bg-card: #ffffff;
+  --border: #e5e5e0;
+  --border-strong: #d1d1cc;
+  --text: #1f2937;
+  --text-muted: #6b7280;
+  --text-dim: #9ca3af;
+  --accent: #d97706;
+  --accent-hover: #b45309;
+  --accent-soft: rgba(217, 119, 6, 0.08);
   --success: #10b981;
-  --success-hover: #34d399;
-  --warning: #f59e0b;
+  --success-hover: #059669;
+  --warning: #d97706;
   --danger: #ef4444;
-  --diff-add-bg: rgba(16, 185, 129, 0.12);
+  --diff-add-bg: rgba(16, 185, 129, 0.08);
   --diff-add-border: #10b981;
-  --diff-del-bg: rgba(239, 68, 68, 0.12);
+  --diff-del-bg: rgba(239, 68, 68, 0.08);
   --diff-del-border: #ef4444;
 
-  --font-sans: 'Inter Tight', system-ui, -apple-system, sans-serif;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
   --font-serif: 'Fraunces', Georgia, serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+  --font-mono: ui-monospace, Menlo, Consolas, monospace;
 }
 
 * { box-sizing: border-box; }
@@ -54,10 +54,10 @@ button:disabled { cursor: not-allowed; }
 input, textarea {
   font-family: inherit;
   font-size: inherit;
-  background: var(--bg-elev);
+  background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 12px;
   padding: 12px 16px;
   outline: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -83,7 +83,7 @@ input:focus, textarea:focus {
   color: var(--text);
 }
 .mx-brand-tag {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-muted);
   font-style: italic;
 }
@@ -94,7 +94,7 @@ input:focus, textarea:focus {
   align-items: center;
   gap: 8px;
   padding: 10px 18px;
-  border-radius: 8px;
+  border-radius: 12px;
   border: 1px solid transparent;
   font-weight: 500;
   font-size: 14px;
@@ -106,22 +106,26 @@ input:focus, textarea:focus {
   background: var(--accent);
   color: white;
   border-color: var(--accent);
+  box-shadow: 0 1px 3px rgba(217, 119, 6, 0.2);
 }
 .mx-btn-primary:hover:not(:disabled) {
   background: var(--accent-hover);
   border-color: var(--accent-hover);
   transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(217, 119, 6, 0.25);
 }
 
 .mx-btn-success {
   background: var(--success);
   color: white;
   border-color: var(--success);
+  box-shadow: 0 1px 3px rgba(16, 185, 129, 0.2);
 }
 .mx-btn-success:hover:not(:disabled) {
   background: var(--success-hover);
   border-color: var(--success-hover);
   transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
 }
 
 .mx-btn-secondary {
@@ -130,7 +134,7 @@ input:focus, textarea:focus {
   border-color: var(--border-strong);
 }
 .mx-btn-secondary:hover:not(:disabled) {
-  background: var(--bg-card);
+  background: var(--bg);
   border-color: var(--accent);
 }
 
@@ -141,7 +145,7 @@ input:focus, textarea:focus {
 }
 .mx-btn-ghost:hover:not(:disabled) {
   color: var(--text);
-  background: var(--bg-elev);
+  background: rgba(0, 0, 0, 0.04);
 }
 
 .mx-btn-danger {
@@ -150,21 +154,23 @@ input:focus, textarea:focus {
   border-color: var(--danger);
 }
 .mx-btn-danger:hover:not(:disabled) {
-  background: rgba(239, 68, 68, 0.1);
+  background: rgba(239, 68, 68, 0.06);
 }
 
 /* ─── Cards ────────────────────────────────────────────── */
 .mx-card {
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 16px;
   padding: 20px 24px;
-  transition: border-color 0.15s ease, transform 0.15s ease;
+  transition: border-color 0.15s ease, transform 0.15s ease, box-shadow 0.15s ease;
   cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 .mx-card:hover {
   border-color: var(--accent);
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
 }
 
 /* ─── Markdown rendering ───────────────────────────────── */
@@ -204,7 +210,7 @@ input:focus, textarea:focus {
 .mx-md code {
   font-family: var(--font-mono);
   font-size: 13px;
-  background: var(--bg-elev);
+  background: rgba(0, 0, 0, 0.04);
   padding: 2px 6px;
   border-radius: 4px;
 }
@@ -230,11 +236,11 @@ input:focus, textarea:focus {
 }
 
 @keyframes pulse-add {
-  0% { background: rgba(16, 185, 129, 0.4); }
+  0% { background: rgba(16, 185, 129, 0.25); }
   100% { background: var(--diff-add-bg); }
 }
 @keyframes pulse-del {
-  0% { background: rgba(239, 68, 68, 0.4); }
+  0% { background: rgba(239, 68, 68, 0.25); }
   100% { background: var(--diff-del-bg); }
 }
 
@@ -282,8 +288,8 @@ input:focus, textarea:focus {
   border: 1px solid var(--success);
   color: var(--text);
   padding: 12px 20px;
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
   font-size: 14px;
   z-index: 1000;
   animation: slide-up 0.3s ease, fade-out 0.3s ease 1.7s forwards;
@@ -307,7 +313,7 @@ input:focus, textarea:focus {
 .mx-empty-icon {
   font-size: 48px;
   margin-bottom: 16px;
-  opacity: 0.5;
+  opacity: 0.4;
 }
 .mx-empty h2 {
   font-family: var(--font-serif);
