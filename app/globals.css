@@ -235,6 +235,22 @@ input:focus, textarea:focus {
   animation: pulse-del 1.2s ease;
 }
 
+/* Search highlighting */
+.mx-search-match {
+  background: rgba(217, 119, 6, 0.15);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+.mx-search-active {
+  background: rgba(217, 119, 6, 0.45);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 @keyframes pulse-add {
   0% { background: rgba(16, 185, 129, 0.25); }
   100% { background: var(--diff-add-bg); }

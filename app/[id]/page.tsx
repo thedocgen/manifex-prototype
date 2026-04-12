@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback, use } from 'react';
 import { useRouter } from 'next/navigation';
-import { Markdown } from '@/components/Markdown';
+import { Markdown, countMatches } from '@/components/Markdown';
 import type { ManifexSession, ManifestState, TreeNode } from '@/lib/types';
 
 type StatusKind = 'idle' | 'thinking' | 'compiling' | 'saving' | 'success' | 'error';
@@ -91,6 +91,9 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [activePage, setActivePage] = useState<string>('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [sidebarSearch, setSidebarSearch] = useState('');
+  const [pageSearch, setPageSearch] = useState('');
+  const [pageSearchOpen, setPageSearchOpen] = useState(false);
+  const [activeMatchIdx, setActiveMatchIdx] = useState(0);
 
   const load = async () => {
     const res = await fetch(`/api/manifex/sessions/${id}`);
@@ -117,6 +120,19 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     const t = setTimeout(() => setToast(null), 2000);
     return () => clearTimeout(t);
   }, [toast]);
+
+  // Reset page search when switching pages
+  useEffect(() => {
+    setPageSearch('');
+    setActiveMatchIdx(0);
+  }, [activePage]);
+
+  // Scroll to active search match
+  useEffect(() => {
+    if (!pageSearch) return;
+    const el = document.querySelector('.mx-search-active');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [activeMatchIdx, pageSearch]);
 
   const showToast = (kind: 'success' | 'error', msg: string) => setToast({ kind, msg });
 
@@ -356,10 +372,84 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                   {currentState.pages[effectiveActivePage]?.title || effectiveActivePage}
                 </span>
               </div>
-              <span style={{ fontSize: '11px' }}>
-                {Object.keys(currentState.pages).length} pages
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <button
+                  onClick={() => { setPageSearchOpen(!pageSearchOpen); if (pageSearchOpen) { setPageSearch(''); setActiveMatchIdx(0); } }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: '12px',
+                    color: pageSearchOpen ? 'var(--accent)' : 'var(--text-muted)',
+                    padding: '2px 6px',
+                  }}
+                  title="Search in page"
+                >
+                  ⌕
+                </button>
+                <span style={{ fontSize: '11px' }}>
+                  {Object.keys(currentState.pages).length} pages
+                </span>
+              </div>
             </div>
+
+            {/* In-page search bar */}
+            {pageSearchOpen && (() => {
+              const matchCount = countMatches(pageContent, pageSearch);
+              return (
+                <div style={{
+                  padding: '6px 16px',
+                  borderBottom: '1px solid var(--border)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  fontSize: '12px',
+                  background: 'var(--bg)',
+                }}>
+                  <input
+                    autoFocus
+                    value={pageSearch}
+                    onChange={e => { setPageSearch(e.target.value); setActiveMatchIdx(0); }}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        if (e.shiftKey) setActiveMatchIdx(Math.max(0, activeMatchIdx - 1));
+                        else if (matchCount > 0) setActiveMatchIdx((activeMatchIdx + 1) % matchCount);
+                      }
+                      if (e.key === 'Escape') { setPageSearchOpen(false); setPageSearch(''); setActiveMatchIdx(0); }
+                    }}
+                    placeholder="Find in page…"
+                    style={{ width: '180px', padding: '4px 8px', fontSize: '12px', borderRadius: '4px' }}
+                  />
+                  {pageSearch && (
+                    <>
+                      <span style={{ color: matchCount > 0 ? 'var(--text-muted)' : 'var(--danger)', whiteSpace: 'nowrap' }}>
+                        {matchCount > 0 ? `${activeMatchIdx + 1} / ${matchCount}` : 'No results'}
+                      </span>
+                      <button
+                        onClick={() => setActiveMatchIdx(Math.max(0, activeMatchIdx - 1))}
+                        disabled={matchCount === 0}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '14px', padding: '0 4px' }}
+                      >
+                        ‹
+                      </button>
+                      <button
+                        onClick={() => { if (matchCount > 0) setActiveMatchIdx((activeMatchIdx + 1) % matchCount); }}
+                        disabled={matchCount === 0}
+                        style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', fontSize: '14px', padding: '0 4px' }}
+                      >
+                        ›
+                      </button>
+                    </>
+                  )}
+                  <button
+                    onClick={() => { setPageSearchOpen(false); setPageSearch(''); setActiveMatchIdx(0); }}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', fontSize: '14px', padding: '0 4px', marginLeft: 'auto' }}
+                  >
+                    ✕
+                  </button>
+                </div>
+              );
+            })()}
 
             {/* Changes summary banner */}
             {pending && changedPaths.size > 0 && (
@@ -408,7 +498,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
               opacity: status === 'thinking' ? 0.6 : 1,
               transition: 'opacity 0.2s ease',
             }}>
-              <Markdown content={pageContent} diffAgainst={diffAgainst} />
+              <Markdown content={pageContent} diffAgainst={diffAgainst} searchTerm={pageSearch} activeMatchIndex={activeMatchIdx} />
               {pending && changedPaths.has(effectiveActivePage) && pending.diff_summary && (
                 <div style={{
                   marginTop: '24px',

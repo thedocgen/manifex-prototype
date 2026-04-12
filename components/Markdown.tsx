@@ -1,10 +1,13 @@
 // Tiny markdown renderer for Manifex.
 // Supports: # h1, ## h2, ### h3, paragraphs, - lists, `inline code`.
 // Optional `diff` mode highlights added/removed lines via line-level comparison.
+// Optional `searchTerm` highlights matching text with <mark> tags.
 
 interface Props {
   content: string;
-  diffAgainst?: string | null; // if provided, lines added vs this base are highlighted
+  diffAgainst?: string | null;
+  searchTerm?: string;
+  activeMatchIndex?: number; // which match gets the "active" highlight
 }
 
 interface Line {
@@ -25,18 +28,47 @@ function diffLines(current: string, base: string | null | undefined): Line[] {
     status: baseLines.has(line) ? 'unchanged' as const : 'added' as const,
   }));
 
-  // Append removed lines from base that aren't in current (shown at the bottom for context)
-  // Skip — keeps diff cleaner. Could be enhanced later.
   void currentSet;
-
   return result;
 }
 
-function renderLine(line: string, key: number): React.ReactNode {
+// Global match counter — reset before each render
+let _matchCounter = 0;
+
+function highlightSearch(text: string, term: string, activeIdx: number): React.ReactNode[] {
+  if (!term) return [text];
+  const lower = text.toLowerCase();
+  const termLower = term.toLowerCase();
+  const parts: React.ReactNode[] = [];
+  let lastIdx = 0;
+  let searchStart = 0;
+
+  while (true) {
+    const idx = lower.indexOf(termLower, searchStart);
+    if (idx === -1) break;
+    if (idx > lastIdx) parts.push(text.slice(lastIdx, idx));
+    const matchIdx = _matchCounter++;
+    const isActive = matchIdx === activeIdx;
+    parts.push(
+      <mark
+        key={`m${matchIdx}`}
+        className={isActive ? 'mx-search-active' : 'mx-search-match'}
+        data-match-index={matchIdx}
+      >
+        {text.slice(idx, idx + term.length)}
+      </mark>
+    );
+    lastIdx = idx + term.length;
+    searchStart = lastIdx;
+  }
+  if (lastIdx < text.length) parts.push(text.slice(lastIdx));
+  return parts;
+}
+
+function renderLine(line: string, key: number, searchTerm?: string, activeMatchIdx?: number): React.ReactNode {
   const trimmed = line.trim();
   if (!trimmed) return <br key={key} />;
 
-  // Inline code
   const renderInline = (text: string): React.ReactNode[] => {
     const parts: React.ReactNode[] = [];
     let lastIdx = 0;
@@ -44,11 +76,15 @@ function renderLine(line: string, key: number): React.ReactNode {
     let m: RegExpExecArray | null;
     let idx = 0;
     while ((m = re.exec(text))) {
-      if (m.index > lastIdx) parts.push(text.slice(lastIdx, m.index));
-      parts.push(<code key={`c${idx++}`}>{m[1]}</code>);
+      if (m.index > lastIdx) {
+        parts.push(...highlightSearch(text.slice(lastIdx, m.index), searchTerm || '', activeMatchIdx ?? -1));
+      }
+      parts.push(<code key={`c${idx++}`}>{...highlightSearch(m[1], searchTerm || '', activeMatchIdx ?? -1)}</code>);
       lastIdx = m.index + m[0].length;
     }
-    if (lastIdx < text.length) parts.push(text.slice(lastIdx));
+    if (lastIdx < text.length) {
+      parts.push(...highlightSearch(text.slice(lastIdx), searchTerm || '', activeMatchIdx ?? -1));
+    }
     return parts;
   };
 
@@ -59,10 +95,28 @@ function renderLine(line: string, key: number): React.ReactNode {
   return <p key={key}>{renderInline(trimmed)}</p>;
 }
 
-export function Markdown({ content, diffAgainst }: Props) {
+/** Count total search matches in content (for parent component) */
+export function countMatches(content: string, term: string): number {
+  if (!term) return 0;
+  const lower = content.toLowerCase();
+  const termLower = term.toLowerCase();
+  let count = 0;
+  let pos = 0;
+  while (true) {
+    const idx = lower.indexOf(termLower, pos);
+    if (idx === -1) break;
+    count++;
+    pos = idx + term.length;
+  }
+  return count;
+}
+
+export function Markdown({ content, diffAgainst, searchTerm, activeMatchIndex }: Props) {
+  // Reset match counter for this render
+  _matchCounter = 0;
+
   const lines = diffLines(content, diffAgainst);
 
-  // Group consecutive list items into <ul> blocks
   const blocks: React.ReactNode[] = [];
   let listBuffer: { node: React.ReactNode; status: Line['status'] }[] = [];
   let key = 0;
@@ -84,10 +138,13 @@ export function Markdown({ content, diffAgainst }: Props) {
   lines.forEach((line, i) => {
     const trimmed = line.text.trim();
     if (trimmed.startsWith('- ')) {
-      listBuffer.push({ node: renderLine(line.text, i), status: line.status });
+      listBuffer.push({
+        node: renderLine(line.text, i, searchTerm, activeMatchIndex),
+        status: line.status,
+      });
     } else {
       flushList();
-      const node = renderLine(line.text, i);
+      const node = renderLine(line.text, i, searchTerm, activeMatchIndex);
       if (node) {
         if (line.status === 'unchanged' || !trimmed) {
           blocks.push(node);
