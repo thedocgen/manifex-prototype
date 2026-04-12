@@ -261,7 +261,11 @@ export default function HomePage() {
         fontSize: '13px',
         color: 'var(--text-dim)',
       }}>
-        Manifex by Manifex Labs · Documentation as code
+        <span>Manifex by Manifex Labs · Documentation as code</span>
+        <span style={{ margin: '0 8px' }}>·</span>
+        <a href="/about" style={{ color: 'var(--text-dim)', textDecoration: 'underline' }}>
+          Why is Manifex different?
+        </a>
       </footer>
     </div>
   );
