@@ -177,12 +177,15 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     }
     if (data.inlined_html) {
       setPreviewHtml(data.inlined_html);
-    } else if (data.session) {
-      renderInBackground();
     }
+    // Do NOT auto-render on load — docs-first flow means preview
+    // only appears when user clicks "Build your app" or accepts changes
   };
 
   useEffect(() => { load(); }, [id]);
+
+  // Note: initial prompt is now sent by the home page before redirect,
+  // so no sessionStorage/auto-submit needed here.
 
   useEffect(() => {
     if (!toast) return;
@@ -290,9 +293,10 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     }
   };
 
-  const submitPrompt = async () => {
-    if (!prompt.trim() && !pendingFile) return;
-    let p = prompt;
+  const submitPrompt = async (overridePrompt?: string | any) => {
+    const promptText = (typeof overridePrompt === 'string') ? overridePrompt : prompt;
+    if (!promptText.trim() && !pendingFile) return;
+    let p = promptText;
     setPrompt('');
     setConversationOpen(true);
 
@@ -341,7 +345,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       const data = await res.json();
 
       if (data.response_type === 'question') {
-        // LLM asked a question
+        // LLM asked a question — make conversation prominent
         const assistantMsg: ConversationMessage = {
           role: 'assistant',
           content: data.message,
@@ -349,6 +353,12 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           timestamp: new Date().toISOString(),
         };
         setConversation(prev => [...prev, assistantMsg]);
+        setConversationOpen(true);
+        // Scroll conversation to bottom after render
+        setTimeout(() => {
+          const convo = document.querySelector('[data-conversation-thread]');
+          if (convo) convo.scrollTop = convo.scrollHeight;
+        }, 100);
       } else {
         // LLM updated docs
         if (data.session) {
@@ -984,7 +994,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         )}
 
         {conversationOpen && conversation.length > 0 && (
-          <div style={{
+          <div data-conversation-thread style={{
             flex: 1,
             overflow: 'auto',
             padding: '12px 24px',
@@ -1055,14 +1065,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                             {q.options.map(opt => (
                               <button
                                 key={opt}
-                                onClick={() => {
-                                  setPrompt(opt);
-                                  // Auto-submit the choice
-                                  setTimeout(() => {
-                                    const btn = document.querySelector('[data-testid="submit-prompt-btn"]') as HTMLButtonElement;
-                                    if (btn && !btn.disabled) btn.click();
-                                  }, 50);
-                                }}
+                                onClick={() => submitPrompt(opt)}
                                 disabled={busy}
                                 style={{
                                   background: 'var(--bg-elev)',

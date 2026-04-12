@@ -7,13 +7,18 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'session not found' }, { status: 404 });
 
-  // Check for a cached compilation of the current manifest. If present,
-  // return the inlined HTML so the frontend can auto-populate the iframe.
+  // Only return cached compilation if the docs have real content
+  // (more than just the starter overview page). This ensures the
+  // doc-first flow: preview stays hidden until docs are built.
   const COMPILER_VERSION = 'manifex-claude-sonnet-4-v3';
-  const cached = await getCachedCompilation(session.manifest_state.sha, COMPILER_VERSION);
+  const pageCount = Object.keys(session.manifest_state.pages).length;
   let inlined_html: string | null = null;
-  if (cached) {
-    inlined_html = inlineCodex(cached.files);
+
+  if (pageCount > 1) {
+    const cached = await getCachedCompilation(session.manifest_state.sha, COMPILER_VERSION);
+    if (cached) {
+      inlined_html = inlineCodex(cached.files);
+    }
   }
 
   return NextResponse.json({ session, inlined_html });

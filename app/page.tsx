@@ -38,7 +38,7 @@ export default function HomePage() {
     if (data.session) router.push(`/${data.session.id}`);
   };
 
-  // Start brainstorming: create project + session, navigate to editor (planning phase kicks in)
+  // Start brainstorming: create project + session, send prompt, navigate to editor
   const startBrainstorm = async () => {
     setCreating(true);
     try {
@@ -52,11 +52,11 @@ export default function HomePage() {
         const sessRes = await fetch(`/api/manifex/projects/${data.project.id}/sessions`, { method: 'POST' });
         const sessData = await sessRes.json();
         if (sessData.session) {
-          // Send the brainstorm prompt to trigger planning phase
+          const brainstormPrompt = "I have a rough idea but I'm not sure how to shape it yet. Can you help me think through it?";
           await fetch(`/api/manifex/sessions/${sessData.session.id}/prompt`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt: "I have a rough idea but I'm not sure how to shape it yet. Can you help me think through it?" }),
+            body: JSON.stringify({ prompt: brainstormPrompt }),
           });
           router.push(`/${sessData.session.id}`);
         }
@@ -81,6 +81,8 @@ export default function HomePage() {
         const sessRes = await fetch(`/api/manifex/projects/${data.project.id}/sessions`, { method: 'POST' });
         const sessData = await sessRes.json();
         if (sessData.session) {
+          // Send prompt directly before redirecting — avoids stale closure
+          // issues with useEffect auto-submit on the editor page
           await fetch(`/api/manifex/sessions/${sessData.session.id}/prompt`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
