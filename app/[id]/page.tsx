@@ -44,20 +44,6 @@ window.addEventListener('message', function(e) {
 
 // ── Sidebar Tree ──
 
-function pageIcon(path: string, title: string): string {
-  const p = path.toLowerCase();
-  const t = title.toLowerCase();
-  if (p === '_build-history') return '📜';
-  if (p.includes('overview') || t.includes('overview')) return '📋';
-  if (p.includes('architect') || t.includes('architect')) return '🏗';
-  if (p.includes('style') || t.includes('style')) return '🎨';
-  if (p.includes('api') || t.includes('api')) return '📡';
-  if (p.includes('data') || t.includes('data')) return '📊';
-  if (p.includes('auth') || t.includes('auth')) return '🔐';
-  if (p.includes('ui') || t.includes('spec')) return '🖥';
-  return '📄';
-}
-
 function TreeItem({ node, activePath, changedPaths, onSelect, depth = 0 }: {
   node: TreeNode;
   activePath: string;
@@ -95,15 +81,13 @@ function TreeItem({ node, activePath, changedPaths, onSelect, depth = 0 }: {
         onMouseEnter={e => { if (!isActive) (e.target as HTMLElement).style.background = 'rgba(0,0,0,0.03)'; }}
         onMouseLeave={e => { if (!isActive) (e.target as HTMLElement).style.background = 'transparent'; }}
       >
-        {hasChildren ? (
+        {hasChildren && (
           <span
             onClick={e => { e.stopPropagation(); setExpanded(!expanded); }}
-            style={{ fontSize: '10px', color: 'var(--text-dim)', width: '14px', textAlign: 'center' }}
+            style={{ fontSize: '10px', color: 'var(--text-dim)', width: '12px', textAlign: 'center' }}
           >
             {expanded ? '▾' : '▸'}
           </span>
-        ) : (
-          <span style={{ fontSize: '12px', width: '14px', textAlign: 'center' }}>{pageIcon(node.path, node.title)}</span>
         )}
         <span style={{ flex: 1 }}>{node.title}</span>
         {isChanged && (
@@ -1151,7 +1135,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             title="Attach image"
             style={{ padding: '6px 8px', fontSize: '16px' }}
           >
-            📎
+            Attach
           </button>
           <textarea
             data-testid="prompt-input"
