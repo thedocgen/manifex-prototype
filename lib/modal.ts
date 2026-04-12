@@ -48,7 +48,9 @@ When using update_docs:
 - Technical pages document real decisions. Product pages describe what the app does.
 - Page paths use lowercase with hyphens. Each page's content is markdown starting with a heading.
 - changed_pages lists paths of modified/created/removed pages.
-- diff_summary is a brief user-friendly sentence about what changed.`;
+- diff_summary is a brief user-friendly sentence about what changed.
+
+If an image is provided alongside the request, use it as a visual reference. Analyze the layout, colors, typography, components, and overall design shown in the image. Update the documentation pages (especially Styles and UI Specs) to match the visual design shown. If no text prompt accompanies the image, describe what you see and create documentation to replicate it.`;
 
 const TREE_NODE_SCHEMA = {
   type: 'object' as const,
@@ -165,24 +167,33 @@ export async function editManifest(
   prompt: string,
   options: {
     variation?: boolean;
-    conversationContext?: ConversationMessage[]; // recent exchanges for multi-turn
+    conversationContext?: ConversationMessage[];
+    image?: { base64: string; media_type: string };
   } = {}
 ): Promise<EditResponse> {
   const serialized = serializePages(currentState);
 
-  // Build the user message with optional conversation context
-  let userContent = `CURRENT DOCUMENTATION PAGES:\n\n${serialized}\n\nCURRENT TREE STRUCTURE:\n${JSON.stringify(currentState.tree, null, 2)}\n\n---\n\n`;
+  let userText = `CURRENT DOCUMENTATION PAGES:\n\n${serialized}\n\nCURRENT TREE STRUCTURE:\n${JSON.stringify(currentState.tree, null, 2)}\n\n---\n\n`;
 
-  // Include recent conversation context for multi-turn flows
   if (options.conversationContext && options.conversationContext.length > 0) {
-    userContent += 'RECENT CONVERSATION:\n';
+    userText += 'RECENT CONVERSATION:\n';
     for (const msg of options.conversationContext) {
-      userContent += `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}\n`;
+      userText += `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}\n`;
     }
-    userContent += '\n---\n\n';
+    userText += '\n---\n\n';
   }
 
-  userContent += `USER REQUEST: ${prompt}`;
+  userText += `USER REQUEST: ${prompt || '(see attached image)'}`;
+
+  // Build message content — multimodal if image provided
+  const messageContent: any[] = [];
+  if (options.image) {
+    messageContent.push({
+      type: 'image',
+      source: { type: 'base64', media_type: options.image.media_type, data: options.image.base64 },
+    });
+  }
+  messageContent.push({ type: 'text', text: userText });
 
   const resp = await client().messages.create({
     model: MODEL,
@@ -190,8 +201,7 @@ export async function editManifest(
     temperature: options.variation ? 0.9 : 0,
     system: EDIT_SYSTEM,
     tools: [UPDATE_DOCS_TOOL, ASK_USER_TOOL],
-    // Let the LLM choose which tool to call
-    messages: [{ role: 'user', content: userContent }],
+    messages: [{ role: 'user', content: messageContent }],
   });
 
   const toolUse = resp.content.find(b => b.type === 'tool_use');

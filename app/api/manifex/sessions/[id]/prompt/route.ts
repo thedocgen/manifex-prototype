@@ -10,13 +10,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const body = await req.json().catch(() => ({}));
   const prompt: string = (body.prompt || '').trim();
-  if (!prompt) return NextResponse.json({ error: 'prompt required' }, { status: 400 });
+  const image: { base64: string; media_type: string } | undefined = body.image;
+  if (!prompt && !image) return NextResponse.json({ error: 'prompt or image required' }, { status: 400 });
 
-  // Client passes recent conversation for multi-turn context
   const conversationContext: ConversationMessage[] = body.conversationContext || [];
 
   const response = await editManifest(session.manifest_state, prompt, {
     conversationContext: conversationContext.length > 0 ? conversationContext : undefined,
+    image,
   });
 
   if (response.type === 'question') {

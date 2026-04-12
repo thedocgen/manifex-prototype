@@ -151,6 +151,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [activeMatchIdx, setActiveMatchIdx] = useState(0);
   const [conversationOpen, setConversationOpen] = useState(false);
   const [conversation, setConversation] = useState<ConversationMessage[]>([]);
+  const [pendingImage, setPendingImage] = useState<{ base64: string; mediaType: string; previewUrl: string } | null>(null);
 
   const load = async () => {
     const res = await fetch(`/api/manifex/sessions/${id}`);
@@ -165,8 +166,15 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     }
     if (data.inlined_html) {
       setPreviewHtml(data.inlined_html);
-    } else if (data.session) {
-      renderInBackground();
+    } else {
+      // Check for pre-built template HTML from sessionStorage
+      const templateHtml = sessionStorage.getItem(`template-html-${id}`);
+      if (templateHtml) {
+        setPreviewHtml(templateHtml);
+        sessionStorage.removeItem(`template-html-${id}`);
+      } else if (data.session) {
+        renderInBackground();
+      }
     }
   };
 
@@ -278,7 +286,13 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     setConversationOpen(true);
 
     // Add user message to local conversation
-    const userMsg: ConversationMessage = { role: 'user', content: p, timestamp: new Date().toISOString() };
+    const userMsg: ConversationMessage = {
+      role: 'user',
+      content: p || '(image)',
+      imageUrl: pendingImage?.previewUrl,
+      timestamp: new Date().toISOString(),
+    };
+    setPendingImage(null);
     const updatedConvo = [...conversation, userMsg];
     setConversation(updatedConvo);
 
@@ -302,7 +316,11 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       const res = await fetch(`/api/manifex/sessions/${id}/prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: p, conversationContext: recentContext }),
+        body: JSON.stringify({
+          prompt: p,
+          conversationContext: recentContext,
+          ...(pendingImage ? { image: { base64: pendingImage.base64, media_type: pendingImage.mediaType } } : {}),
+        }),
       });
       const data = await res.json();
 
@@ -833,8 +851,44 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             ) : previewHtml ? (
               <iframe ref={iframeRef} data-testid="preview-iframe" srcDoc={previewHtml + PREVIEW_BRIDGE_SCRIPT} style={{ width: '100%', height: '100%', border: 'none' }} />
             ) : (
-              <div style={{ padding: '40px 24px', color: '#6b7280', textAlign: 'center' }}>
-                Describe what you want below and your app will appear here.
+              <div style={{ padding: '60px 32px', textAlign: 'center' }}>
+                {busy ? (
+                  <div style={{ color: 'var(--text-muted)' }}>
+                    <div className="mx-typing-dots" style={{ justifyContent: 'center', marginBottom: '16px' }}>
+                      <span /><span /><span />
+                    </div>
+                    <p style={{ fontSize: '16px', margin: 0 }}>Your app is being created…</p>
+                  </div>
+                ) : (
+                  <div>
+                    <p style={{ fontSize: '20px', fontFamily: 'var(--font-serif)', fontWeight: 600, color: 'var(--text)', margin: '0 0 8px' }}>
+                      What are you building?
+                    </p>
+                    <p style={{ fontSize: '14px', color: 'var(--text-dim)', margin: '0 0 20px' }}>
+                      Describe it below, or try one of these:
+                    </p>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '360px', margin: '0 auto' }}>
+                      {['A booking system for my yoga studio', 'A dashboard to track my reading goals', 'A fan page for my cat'].map(ex => (
+                        <button
+                          key={ex}
+                          onClick={() => setPrompt(ex)}
+                          style={{
+                            background: 'var(--accent-soft)',
+                            border: '1px solid rgba(217,119,6,0.12)',
+                            borderRadius: '10px',
+                            padding: '10px 16px',
+                            fontSize: '13px',
+                            color: 'var(--accent)',
+                            cursor: 'pointer',
+                            textAlign: 'left',
+                          }}
+                        >
+                          {ex}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -924,6 +978,9 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                   lineHeight: 1.5,
                   color: 'var(--text)',
                 }}>
+                  {msg.imageUrl && (
+                    <img src={msg.imageUrl} alt="Uploaded" style={{ maxWidth: '200px', maxHeight: '120px', borderRadius: '6px', marginBottom: '6px', display: 'block' }} />
+                  )}
                   {msg.content}
                   {/* Show changed pages in timeline */}
                   {msg.changed_pages && msg.changed_pages.length > 0 && (
@@ -1047,12 +1104,55 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           </div>
         )}
 
+        {/* Image preview */}
+        {pendingImage && (
+          <div style={{ padding: '6px 24px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <img src={pendingImage.previewUrl} alt="Upload" style={{ height: '40px', borderRadius: '6px', border: '1px solid var(--border)' }} />
+            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Image attached</span>
+            <button onClick={() => setPendingImage(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', fontSize: '14px' }}>✕</button>
+          </div>
+        )}
+
         {/* Prompt input */}
         <div style={{ padding: '12px 24px', display: 'flex', gap: '10px', alignItems: 'center' }}>
           <div style={{ display: 'flex', gap: '4px' }}>
             <button data-testid="undo-btn" onClick={() => action('/undo', undefined, { statusMsg: 'Undoing…', autoRender: true })} disabled={busy || session.history.length === 0} className="mx-btn mx-btn-ghost" title="Undo" style={{ padding: '6px 8px', fontSize: '13px' }}>↶</button>
             <button data-testid="redo-btn" onClick={() => action('/redo', undefined, { statusMsg: 'Redoing…', autoRender: true })} disabled={busy || session.redo_stack.length === 0} className="mx-btn mx-btn-ghost" title="Redo" style={{ padding: '6px 8px', fontSize: '13px' }}>↷</button>
           </div>
+          {/* Image upload */}
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp"
+            id="image-upload"
+            style={{ display: 'none' }}
+            onChange={e => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              // Resize to max 1024px width
+              const img = new Image();
+              img.onload = () => {
+                const maxW = 1024;
+                const scale = img.width > maxW ? maxW / img.width : 1;
+                const canvas = document.createElement('canvas');
+                canvas.width = img.width * scale;
+                canvas.height = img.height * scale;
+                canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height);
+                const base64 = canvas.toDataURL(file.type).split(',')[1];
+                setPendingImage({ base64, mediaType: file.type, previewUrl: URL.createObjectURL(file) });
+              };
+              img.src = URL.createObjectURL(file);
+              e.target.value = '';
+            }}
+          />
+          <button
+            onClick={() => document.getElementById('image-upload')?.click()}
+            disabled={busy}
+            className="mx-btn mx-btn-ghost"
+            title="Attach image"
+            style={{ padding: '6px 8px', fontSize: '16px' }}
+          >
+            📎
+          </button>
           <textarea
             data-testid="prompt-input"
             value={prompt}
@@ -1063,7 +1163,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             rows={1}
             style={{ flex: 1, resize: 'none', fontFamily: 'var(--font-sans)' }}
           />
-          <button data-testid="submit-prompt-btn" onClick={submitPrompt} disabled={busy || !prompt.trim()} className="mx-btn mx-btn-primary">
+          <button data-testid="submit-prompt-btn" onClick={submitPrompt} disabled={busy || (!prompt.trim() && !pendingImage)} className="mx-btn mx-btn-primary">
             {status === 'thinking' ? <><span className="mx-typing-dots"><span /><span /><span /></span></> : 'Tell me'}
           </button>
         </div>
