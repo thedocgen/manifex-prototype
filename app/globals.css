@@ -268,6 +268,23 @@ input:focus, textarea:focus {
   font-size: 13px;
   color: var(--text-muted);
 }
+/* ─── Compile indicator ────────────────────────── */
+.mx-compile-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  background-size: 200% 100%;
+  animation: compile-slide 1.5s ease-in-out infinite;
+  z-index: 10;
+}
+@keyframes compile-slide {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
 .mx-status .dot {
   width: 6px;
   height: 6px;

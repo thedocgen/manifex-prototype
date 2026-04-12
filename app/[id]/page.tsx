@@ -87,6 +87,8 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [status, setStatus] = useState<StatusKind>('idle');
   const [statusMsg, setStatusMsg] = useState<string>('');
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
+  const [compiling, setCompiling] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
   const [toast, setToast] = useState<{ kind: 'success' | 'error'; msg: string } | null>(null);
   const [activePage, setActivePage] = useState<string>('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -139,18 +141,25 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const showToast = (kind: 'success' | 'error', msg: string) => setToast({ kind, msg });
 
   const renderInBackground = async () => {
+    setCompiling(true);
+    setPreviewError(null);
     try {
-      // Notify breakout panes that compilation is starting
       try { new BroadcastChannel('manifex-preview').postMessage({ type: 'compiling' }); } catch {}
       const res = await fetch(`/api/manifex/sessions/${id}/render`, { method: 'POST' });
-      if (!res.ok) return;
+      if (!res.ok) {
+        setPreviewError('Something went wrong building your app. Try making another change.');
+        return;
+      }
       const data = await res.json();
       if (data.inlined_html) {
         setPreviewHtml(data.inlined_html);
-        // Broadcast update to breakout panes
         try { new BroadcastChannel('manifex-preview').postMessage({ type: 'update', html: data.inlined_html }); } catch {}
       }
-    } catch { /* silent */ }
+    } catch {
+      setPreviewError('Couldn\'t connect to the build service. Try again in a moment.');
+    } finally {
+      setCompiling(false);
+    }
   };
 
   const action = async (path: string, body?: any, opts: { statusKind?: StatusKind; statusMsg?: string; successMsg?: string; autoRender?: boolean } = {}) => {
@@ -201,7 +210,18 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     const recentContext = updatedConvo.slice(-6);
 
     setStatus('thinking');
-    setStatusMsg('Thinking…');
+    // Progressive loading for first prompt (scaffolding takes 60-90s)
+    const isFirstPrompt = conversation.length <= 1;
+    const progressTimers: ReturnType<typeof setTimeout>[] = [];
+    if (isFirstPrompt) {
+      setStatusMsg('Setting up your project…');
+      progressTimers.push(setTimeout(() => setStatusMsg('Creating documentation…'), 5000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Building your app structure…'), 20000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Almost ready…'), 45000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Taking a bit longer than usual…'), 75000));
+    } else {
+      setStatusMsg('Thinking…');
+    }
     try {
       const res = await fetch(`/api/manifex/sessions/${id}/prompt`, {
         method: 'POST',
@@ -241,8 +261,15 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         showToast('error', data.error || data.message || 'Something went wrong');
       }
     } catch (e: any) {
-      showToast('error', e.message || 'Network error');
+      // Error recovery: friendly message in conversation
+      const errorMsg: ConversationMessage = {
+        role: 'assistant',
+        content: 'Something went wrong. You can try sending your message again.',
+        timestamp: new Date().toISOString(),
+      };
+      setConversation(prev => [...prev, errorMsg]);
     } finally {
+      progressTimers.forEach(clearTimeout);
       setStatus('idle');
       setStatusMsg('');
     }
@@ -277,17 +304,73 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   // Ensure activePage is valid
   const effectiveActivePage = currentState.pages[activePage] ? activePage : (currentState.tree[0]?.path || Object.keys(currentState.pages)[0] || '');
 
-  // Get content for current page
-  const pageContent = currentState.pages[effectiveActivePage]?.content || '';
   const basePageContent = baseState?.pages[effectiveActivePage]?.content || null;
-  // Only show diff if this specific page changed
   const diffAgainst = (baseState && changedPaths.has(effectiveActivePage)) ? basePageContent : null;
+
+  // ── Build History page (auto-generated from conversation) ──
+  const HISTORY_PATH = '_build-history';
+  const historyEntries = conversation.filter(m => m.role === 'user' || (m.role === 'assistant' && m.diff_summary));
+  let historyContent = '# Build History\n\nHow this app came to be.\n';
+  let entryNum = 0;
+  for (let i = 0; i < conversation.length; i++) {
+    const msg = conversation[i];
+    if (msg.role === 'user') {
+      entryNum++;
+      const ts = new Date(msg.timestamp).toLocaleString();
+      historyContent += `\n## ${entryNum}. ${ts}\n\nYou: "${msg.content}"\n`;
+      // Look for the next assistant message with changes
+      const next = conversation[i + 1];
+      if (next && next.role === 'assistant' && next.diff_summary) {
+        historyContent += `\n→ ${next.diff_summary}`;
+        if (next.changed_pages && next.changed_pages.length > 0) {
+          historyContent += ` (${next.changed_pages.join(', ')})`;
+        }
+        historyContent += '\n';
+      } else if (next && next.role === 'assistant' && next.questions) {
+        historyContent += `\n→ Asked clarifying questions\n`;
+      }
+    }
+  }
+
+  // Augmented tree with history page appended
+  const displayTree = [
+    ...currentState.tree,
+    ...(entryNum > 0 ? [{ path: HISTORY_PATH, title: 'Build History' }] : []),
+  ];
+  // Augmented pages with history page
+  const displayPages: { [path: string]: { title: string; content: string } } = {
+    ...currentState.pages,
+    ...(entryNum > 0 ? { [HISTORY_PATH]: { title: 'Build History', content: historyContent } } : {}),
+  };
+
+  // ── Contextual prompt suggestions ──
+  const getSuggestions = (): string[] => {
+    if (pending || busy || Object.keys(currentState.pages).length <= 1) return [];
+    const all = Object.values(currentState.pages).map(p => p.content).join(' ').toLowerCase();
+    const suggestions: string[] = [];
+    if (!all.includes('database') && !all.includes('supabase') && !all.includes('storage'))
+      suggestions.push('Add a database to save data');
+    if (!all.includes('auth') && !all.includes('login') && !all.includes('signup'))
+      suggestions.push('Add user accounts');
+    if (!all.includes('responsive') && !all.includes('mobile'))
+      suggestions.push('Make it work on mobile');
+    if (!all.includes('dark mode') && !all.includes('dark theme'))
+      suggestions.push('Add a dark mode toggle');
+    if (!all.includes('search') && !all.includes('filter'))
+      suggestions.push('Add search or filtering');
+    return suggestions.slice(0, 3);
+  };
+  const suggestions = getSuggestions();
+
+  // Use displayPages for content lookup (includes history page)
+  const isHistoryPage = effectiveActivePage === HISTORY_PATH;
+  const pageContent = displayPages[effectiveActivePage]?.content || '';
 
   // Sidebar search filtering
   const searchLower = sidebarSearch.toLowerCase();
   const searchResults: { path: string; title: string; snippet: string }[] = [];
   if (sidebarSearch.trim()) {
-    for (const [path, page] of Object.entries(currentState.pages)) {
+    for (const [path, page] of Object.entries(displayPages)) {
       const titleMatch = page.title.toLowerCase().includes(searchLower);
       const contentIdx = page.content.toLowerCase().indexOf(searchLower);
       if (titleMatch || contentIdx >= 0) {
@@ -395,7 +478,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                     ))
                   )
                 ) : (
-                  currentState.tree.map(node => (
+                  displayTree.map(node => (
                     <TreeItem
                       key={node.path}
                       node={node}
@@ -444,7 +527,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                   {sidebarOpen ? '◀' : '▶'}
                 </button>
                 <span style={{ fontWeight: 500, color: 'var(--text)' }}>
-                  {currentState.pages[effectiveActivePage]?.title || effectiveActivePage}
+                  {displayPages[effectiveActivePage]?.title || effectiveActivePage}
                 </span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -463,7 +546,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                   ⌕
                 </button>
                 <span style={{ fontSize: '11px' }}>
-                  {Object.keys(currentState.pages).length} pages
+                  {Object.keys(displayPages).length} pages
                 </span>
               </div>
             </div>
@@ -611,7 +694,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span style={{ textTransform: 'uppercase', letterSpacing: '0.05em' }}>Preview</span>
-              {status === 'compiling' && <span style={{ color: 'var(--accent)' }}>Building…</span>}
+              {compiling && <span style={{ color: 'var(--accent)' }}>Updating…</span>}
             </span>
             {previewHtml && (
               <button
@@ -659,17 +742,17 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             )}
           </div>
           <div style={{ flex: 1, background: '#fff', position: 'relative' }}>
-            {status === 'compiling' && (
-              <div style={{
-                position: 'absolute', inset: 0,
-                background: 'rgba(255,255,255,0.9)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: '#374151', fontSize: '14px', gap: '8px', zIndex: 10,
-              }}>
-                <span className="mx-spinner" /> Building your app…
-              </div>
+            {compiling && (
+              <div className="mx-compile-bar" />
             )}
-            {previewHtml ? (
+            {previewError ? (
+              <div style={{ padding: '40px 24px', textAlign: 'center', color: '#6b7280' }}>
+                <p style={{ fontSize: '15px', margin: '0 0 16px' }}>{previewError}</p>
+                <button onClick={renderInBackground} className="mx-btn mx-btn-secondary" style={{ fontSize: '13px' }}>
+                  Try rebuilding
+                </button>
+              </div>
+            ) : previewHtml ? (
               <iframe data-testid="preview-iframe" srcDoc={previewHtml} style={{ width: '100%', height: '100%', border: 'none' }} />
             ) : (
               <div style={{ padding: '40px 24px', color: '#6b7280', textAlign: 'center' }}>
@@ -866,6 +949,29 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                   </div>
                 )}
               </div>
+            ))}
+          </div>
+        )}
+
+        {/* Suggestions */}
+        {suggestions.length > 0 && !prompt && !pending && !busy && (
+          <div style={{ padding: '6px 24px 0', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+            {suggestions.map(s => (
+              <button
+                key={s}
+                onClick={() => { setPrompt(s); }}
+                style={{
+                  background: 'var(--accent-soft)',
+                  border: '1px solid rgba(217,119,6,0.15)',
+                  borderRadius: '16px',
+                  padding: '4px 12px',
+                  fontSize: '12px',
+                  color: 'var(--accent)',
+                  cursor: 'pointer',
+                }}
+              >
+                {s}
+              </button>
             ))}
           </div>
         )}
