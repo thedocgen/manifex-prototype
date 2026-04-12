@@ -81,14 +81,7 @@ export default function HomePage() {
         const sessRes = await fetch(`/api/manifex/projects/${data.project.id}/sessions`, { method: 'POST' });
         const sessData = await sessRes.json();
         if (sessData.session) {
-          // Send prompt directly before redirecting — avoids stale closure
-          // issues with useEffect auto-submit on the editor page
-          await fetch(`/api/manifex/sessions/${sessData.session.id}/prompt`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt: buildPrompt }),
-          });
-          router.push(`/${sessData.session.id}`);
+          router.push(`/${sessData.session.id}?p=${encodeURIComponent(buildPrompt)}`);
         }
       }
     } finally {

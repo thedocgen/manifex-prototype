@@ -395,6 +395,18 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     }
   };
 
+  const initialPromptRef = useRef(false);
+  useEffect(() => {
+    if (initialPromptRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const p = params.get('p');
+    if (!p) return;
+    initialPromptRef.current = true;
+    window.history.replaceState({}, '', `/${id}`);
+    submitPrompt(p);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
   const submitSecretAnswer = async (questionId: string, key: string, value: string) => {
     if (!session) return;
     // Store secret via separate endpoint
