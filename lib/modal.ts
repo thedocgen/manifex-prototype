@@ -3,7 +3,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { sha256 } from './crypto';
-import type { CompiledCodex, ManifestState, DocPage, TreeNode, Question, ConversationMessage } from './types';
+import type { CodexFiles, CompiledCodex, ManifestState, DocPage, TreeNode, Question, ConversationMessage } from './types';
 import { serializePages } from './types';
 
 const COMPILER_VERSION = 'manifex-claude-sonnet-4-v3';
@@ -127,6 +127,13 @@ When generating docs (after planning confirmation, or for follow-up prompts on a
   └──────────────┘
 - CRUD operations: what can be created, read, updated, deleted
 - Data validation rules
+
+**"Tests"** page must include:
+- Plain-language descriptions of expected behaviors organized by feature area
+- Each test group has: a descriptive heading, bullet points listing what should be true, and a "Run test" link
+- Example test groups: Form Validation, Navigation, Visual Design, Data Operations
+- Tests should verify that the compiled app matches what the documentation describes
+- This page is auto-generated and fully mutable via prompts
 
 Additional domain-specific pages as needed (e.g. "User Accounts", "Notifications", "Search and Filters").
 
@@ -427,7 +434,8 @@ CODE RULES:
 - styles.css: minimal — only Tailwind config and custom animations
 - app.js: clean, well-organized JavaScript
 - Be deterministic: identical input should produce equivalent output
-- Annotate major HTML elements with data-doc-page and data-doc-section attributes mapping to the documentation page describing them. Use lowercase hyphenated slugs.${secretsSection}`;
+- Annotate major HTML elements with data-doc-page and data-doc-section attributes mapping to the documentation page describing them. Use lowercase hyphenated slugs.
+- If a Tests documentation page exists, also generate tests_js: executable test functions that validate the compiled app matches the docs. Each test function checks DOM elements, content, and styles. Use a simple assert pattern: function assert(condition, message) { ... }${secretsSection}`;
 }
 
 export async function compileManifestToCodex(
@@ -452,6 +460,7 @@ export async function compileManifestToCodex(
             index_html: { type: 'string' as const, description: 'Complete HTML5 document.' },
             styles_css: { type: 'string' as const, description: 'CSS for the app.' },
             app_js: { type: 'string' as const, description: 'Application JavaScript.' },
+            tests_js: { type: 'string' as const, description: 'JavaScript test functions that validate the compiled app matches the documentation. Each test checks DOM structure, content, or styling.' },
           },
           required: ['index_html' as const, 'styles_css' as const, 'app_js' as const],
         },
@@ -466,14 +475,19 @@ export async function compileManifestToCodex(
   const toolUse = resp.content.find(b => b.type === 'tool_use');
   if (!toolUse || toolUse.type !== 'tool_use') throw new Error('LLM did not call emit_codex');
 
-  const input = toolUse.input as { index_html?: string; styles_css?: string; app_js?: string };
+  const input = toolUse.input as { index_html?: string; styles_css?: string; app_js?: string; tests_js?: string };
   if (!input.index_html || !input.styles_css || !input.app_js) {
     throw new Error(`Compiler missing keys: ${Object.keys(input).join(', ')}`);
   }
 
+  const files: CodexFiles = { 'index.html': input.index_html, 'styles.css': input.styles_css, 'app.js': input.app_js };
+  if (input.tests_js) {
+    files['tests.js'] = input.tests_js;
+  }
+
   return {
-    files: { 'index.html': input.index_html, 'styles.css': input.styles_css, 'app.js': input.app_js },
-    codex_sha: sha256(JSON.stringify({ 'index.html': input.index_html, 'styles.css': input.styles_css, 'app.js': input.app_js })),
+    files,
+    codex_sha: sha256(JSON.stringify(files)),
     compiler_version: COMPILER_VERSION,
   };
 }

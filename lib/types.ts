@@ -17,6 +17,7 @@ export interface ManifestState {
   pages: { [path: string]: DocPage };
   tree: TreeNode[];
   sha: string; // sha256 of JSON.stringify(pages)
+  conversation?: ConversationMessage[];
 }
 
 export interface PendingAttempt {
@@ -74,6 +75,7 @@ export interface CodexFiles {
   'index.html': string;
   'styles.css': string;
   'app.js': string;
+  'tests.js'?: string;
 }
 
 export interface CompiledCodex {

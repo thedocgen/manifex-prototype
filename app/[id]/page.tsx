@@ -137,6 +137,24 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [conversation, setConversation] = useState<ConversationMessage[]>([]);
   const [pendingImage, setPendingImage] = useState<{ base64: string; mediaType: string; previewUrl: string } | null>(null);
 
+  // Track whether conversation was loaded from server (skip persisting on restore)
+  const convoLoadedRef = useRef(false);
+  const convoSkipNextPersist = useRef(false);
+
+  // Persist conversation to Supabase whenever it changes (fire-and-forget)
+  useEffect(() => {
+    if (conversation.length === 0) return; // nothing to persist
+    if (convoSkipNextPersist.current) {
+      convoSkipNextPersist.current = false;
+      return;
+    }
+    fetch(`/api/manifex/sessions/${id}/conversation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation }),
+    }).catch(() => {}); // silent fail — best effort
+  }, [conversation, id]);
+
   const load = async () => {
     const res = await fetch(`/api/manifex/sessions/${id}`);
     const data = await res.json();
@@ -146,6 +164,12 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       const state = data.session.manifest_state as ManifestState;
       if (!activePage && state.tree.length > 0) {
         setActivePage(state.tree[0].path);
+      }
+      // Restore persisted conversation from manifest_state
+      const savedConvo = data.session.manifest_state?.conversation || data.session.conversation;
+      if (savedConvo?.length) {
+        convoSkipNextPersist.current = true;
+        setConversation(savedConvo);
       }
     }
     if (data.inlined_html) {

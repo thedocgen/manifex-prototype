@@ -257,7 +257,7 @@ function rowToSession(row: any): ManifexSession {
     history,
     redo_stack,
     pending_attempt,
-    conversation: row.conversation || [],
+    conversation: row.manifest_state?.conversation || row.conversation || [],
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

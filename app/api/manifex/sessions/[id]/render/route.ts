@@ -2,6 +2,94 @@ import { NextResponse } from 'next/server';
 import { getSession, getCachedCompilation, putCachedCompilation, getSecrets } from '@/lib/store';
 import { compileManifestToCodex } from '@/lib/modal';
 import { inlineCodex } from '@/lib/codex';
+import type { ManifestState, CompiledCodex } from '@/lib/types';
+
+const STYLES_PAGE_PATHS = ['styles', 'look-and-feel', 'look_and_feel'];
+
+/**
+ * Parse a Look-and-Feel / Styles page for color definitions and return
+ * a CSS custom-properties block.  Matches lines like:
+ *   - Primary: #1e293b
+ *   - Background: #ffffff / #f8fafc
+ */
+function extractCssVariables(stylesContent: string): string {
+  const lines = stylesContent.split('\n');
+  const vars: string[] = [];
+  for (const line of lines) {
+    // Match "- SomeName: #hex" (possibly with a second " / #hex" alternate)
+    const m = line.match(/^-\s+(.+?):\s*(#[0-9a-fA-F]{3,8})/);
+    if (m) {
+      const name = m[1]
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]/g, '');
+      vars.push(`  --manifex-${name}: ${m[2]};`);
+
+      // Check for a secondary value after " / "
+      const secondary = line.match(/\/\s*(#[0-9a-fA-F]{3,8})/);
+      if (secondary) {
+        vars.push(`  --manifex-${name}-alt: ${secondary[1]};`);
+      }
+    }
+  }
+  if (vars.length === 0) return '';
+  return `:root {\n${vars.join('\n')}\n}`;
+}
+
+/**
+ * Determine whether the only pages that changed between two manifest states
+ * are style/look-and-feel pages.  Returns the combined styles content if true,
+ * or null if a full recompile is needed.
+ */
+function detectStyleOnlyChange(
+  current: ManifestState,
+  cachedManifest: ManifestState
+): string | null {
+  const allPaths = new Set([
+    ...Object.keys(current.pages),
+    ...Object.keys(cachedManifest.pages),
+  ]);
+
+  let stylesContent: string | null = null;
+  for (const path of allPaths) {
+    const curPage = current.pages[path];
+    const cachedPage = cachedManifest.pages[path];
+
+    // Page unchanged — skip
+    if (
+      curPage && cachedPage &&
+      curPage.content === cachedPage.content &&
+      curPage.title === cachedPage.title
+    ) {
+      continue;
+    }
+
+    // Something changed — is it a styles page?
+    if (STYLES_PAGE_PATHS.includes(path)) {
+      stylesContent = curPage?.content ?? '';
+    } else {
+      // A non-style page changed — full recompile needed
+      return null;
+    }
+  }
+
+  return stylesContent;
+}
+
+/**
+ * Inject a <style> block of CSS custom properties into compiled HTML,
+ * placing it right before </head>.
+ */
+function injectCssVariables(html: string, cssBlock: string): string {
+  if (!cssBlock) return html;
+  const tag = `<style data-manifex-vars>\n${cssBlock}\n</style>`;
+  if (html.includes('</head>')) {
+    return html.replace('</head>', `${tag}\n</head>`);
+  }
+  // Fallback: prepend
+  return tag + '\n' + html;
+}
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -11,17 +99,75 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const COMPILER_VERSION = 'manifex-claude-sonnet-4-v3';
   const manifestSha = session.manifest_state.sha;
 
-  // Check cache
+  // Check exact cache first
   let compiled = await getCachedCompilation(manifestSha, COMPILER_VERSION);
   if (compiled) {
     console.log(`[render] cache HIT for sha ${manifestSha.slice(0, 12)}`);
-  } else {
-    console.log(`[render] cache MISS for sha ${manifestSha.slice(0, 12)}, compiling…`);
-    // Fetch project secrets for injection
-    const secrets = await getSecrets(session.project_id);
-    compiled = await compileManifestToCodex(session.manifest_state, Object.keys(secrets).length > 0 ? secrets : undefined);
-    await putCachedCompilation(manifestSha, COMPILER_VERSION, compiled);
+    const inlined = inlineCodex(compiled.files);
+    return NextResponse.json({
+      codex: compiled,
+      inlined_html: inlined,
+      manifest_sha: manifestSha,
+    });
   }
+
+  // --- Incremental CSS-only path ---
+  // Look for any recent compilation to use as a base for style-only diffs.
+  // We scan compilations for each page-set that differs only in styles pages.
+  // Practically: check the session history for the most recent sha that has a
+  // cached compilation, then see if the diff is style-only.
+  let cssOnlyResult: { compiled: CompiledCodex; inlinedHtml: string } | null = null;
+
+  if (session.history.length > 0) {
+    // Walk history newest-first to find a cached base
+    for (let i = session.history.length - 1; i >= 0; i--) {
+      const prevState = session.history[i];
+      const prevCompiled = await getCachedCompilation(prevState.sha, COMPILER_VERSION);
+      if (!prevCompiled) continue;
+
+      const stylesContent = detectStyleOnlyChange(session.manifest_state, prevState);
+      if (stylesContent !== null) {
+        console.log(`[render] style-only change detected, skipping LLM recompile`);
+        const cssBlock = extractCssVariables(stylesContent);
+        const baseInlined = inlineCodex(prevCompiled.files);
+        const patchedHtml = injectCssVariables(baseInlined, cssBlock);
+
+        // Build a new CompiledCodex with the patched CSS injected into index.html
+        const patchedFiles = { ...prevCompiled.files };
+        patchedFiles['index.html'] = injectCssVariables(
+          prevCompiled.files['index.html'],
+          cssBlock
+        );
+
+        const patchedCodex: CompiledCodex = {
+          files: patchedFiles,
+          codex_sha: manifestSha,
+          compiler_version: COMPILER_VERSION,
+        };
+
+        // Cache this so future hits are instant
+        await putCachedCompilation(manifestSha, COMPILER_VERSION, patchedCodex);
+
+        cssOnlyResult = { compiled: patchedCodex, inlinedHtml: patchedHtml };
+      }
+      break; // Only check the most recent cached ancestor
+    }
+  }
+
+  if (cssOnlyResult) {
+    return NextResponse.json({
+      codex: cssOnlyResult.compiled,
+      inlined_html: cssOnlyResult.inlinedHtml,
+      manifest_sha: manifestSha,
+    });
+  }
+
+  // --- Full compilation path ---
+  console.log(`[render] cache MISS for sha ${manifestSha.slice(0, 12)}, compiling…`);
+  // Fetch project secrets for injection
+  const secrets = await getSecrets(session.project_id);
+  compiled = await compileManifestToCodex(session.manifest_state, Object.keys(secrets).length > 0 ? secrets : undefined);
+  await putCachedCompilation(manifestSha, COMPILER_VERSION, compiled);
 
   const inlined = inlineCodex(compiled.files);
 
