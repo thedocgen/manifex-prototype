@@ -7,7 +7,8 @@ interface Props {
   content: string;
   diffAgainst?: string | null;
   searchTerm?: string;
-  activeMatchIndex?: number; // which match gets the "active" highlight
+  activeMatchIndex?: number;
+  onSectionHover?: (section: string | null) => void;
 }
 
 interface Line {
@@ -32,8 +33,13 @@ function diffLines(current: string, base: string | null | undefined): Line[] {
   return result;
 }
 
-// Global match counter — reset before each render
+// Global state — reset before each render
 let _matchCounter = 0;
+let _sectionHoverCallback: ((section: string | null) => void) | null = null;
+
+function slugify(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+}
 
 function highlightSearch(text: string, term: string, activeIdx: number): React.ReactNode[] {
   if (!term) return [text];
@@ -88,8 +94,22 @@ function renderLine(line: string, key: number, searchTerm?: string, activeMatchI
     return parts;
   };
 
-  if (trimmed.startsWith('### ')) return <h3 key={key}>{renderInline(trimmed.slice(4))}</h3>;
-  if (trimmed.startsWith('## ')) return <h2 key={key}>{renderInline(trimmed.slice(3))}</h2>;
+  if (trimmed.startsWith('### ')) {
+    const text = trimmed.slice(4);
+    const slug = slugify(text);
+    return <h3 key={key} style={{ cursor: _sectionHoverCallback ? 'pointer' : undefined }}
+      onMouseEnter={() => _sectionHoverCallback?.(slug)}
+      onMouseLeave={() => _sectionHoverCallback?.(null)}
+    >{renderInline(text)}</h3>;
+  }
+  if (trimmed.startsWith('## ')) {
+    const text = trimmed.slice(3);
+    const slug = slugify(text);
+    return <h2 key={key} style={{ cursor: _sectionHoverCallback ? 'pointer' : undefined }}
+      onMouseEnter={() => _sectionHoverCallback?.(slug)}
+      onMouseLeave={() => _sectionHoverCallback?.(null)}
+    >{renderInline(text)}</h2>;
+  }
   if (trimmed.startsWith('# ')) return <h1 key={key}>{renderInline(trimmed.slice(2))}</h1>;
   if (trimmed.startsWith('- ')) return <li key={key}>{renderInline(trimmed.slice(2))}</li>;
   return <p key={key}>{renderInline(trimmed)}</p>;
@@ -111,9 +131,9 @@ export function countMatches(content: string, term: string): number {
   return count;
 }
 
-export function Markdown({ content, diffAgainst, searchTerm, activeMatchIndex }: Props) {
-  // Reset match counter for this render
+export function Markdown({ content, diffAgainst, searchTerm, activeMatchIndex, onSectionHover }: Props) {
   _matchCounter = 0;
+  _sectionHoverCallback = onSectionHover || null;
 
   const lines = diffLines(content, diffAgainst);
 

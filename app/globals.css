@@ -235,6 +235,54 @@ input:focus, textarea:focus {
   animation: pulse-del 1.2s ease;
 }
 
+/* ─── Page content fade ──────────────────────────── */
+.mx-page-content {
+  animation: fadeIn 0.15s ease;
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ─── Suggestion pills ──────────────────────────── */
+.mx-suggestion {
+  background: var(--accent-soft);
+  border: 1px solid rgba(217, 119, 6, 0.12);
+  border-radius: 20px;
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+.mx-suggestion:hover {
+  background: rgba(217, 119, 6, 0.12);
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.06);
+}
+
+/* ─── Typing indicator ──────────────────────────── */
+.mx-typing-dots {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.mx-typing-dots span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: typingBounce 1.2s ease-in-out infinite;
+}
+.mx-typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.mx-typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes typingBounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+  40% { transform: translateY(-4px); opacity: 1; }
+}
+
 /* Search highlighting */
 .mx-search-match {
   background: rgba(217, 119, 6, 0.15);

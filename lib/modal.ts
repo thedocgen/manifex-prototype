@@ -305,7 +305,8 @@ Rules:
 - styles.css: CSS for the app, following the Styles documentation.
 - app.js: application logic following the Architecture and UI Specs documentation.
 - Be deterministic: identical input should produce equivalent output.
-- If documentation pages conflict, prefer the more specific page (e.g. UI Specs overrides Overview).${secretsSection}`;
+- If documentation pages conflict, prefer the more specific page (e.g. UI Specs overrides Overview).
+- IMPORTANT: Annotate major HTML elements with data-doc-page and data-doc-section attributes that map back to the documentation page describing them. For example, a login form described in the "ui-specs" page under "Login Form" should have data-doc-page="ui-specs" data-doc-section="login-form" on its container. Every distinct visual section should have at least a data-doc-page attribute. Use lowercase hyphenated slugs for section names derived from the heading text.${secretsSection}`;
 }
 
 export async function compileManifestToCodex(

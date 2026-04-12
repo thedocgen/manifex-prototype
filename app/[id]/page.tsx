@@ -1,12 +1,62 @@
 'use client';
-import { useEffect, useState, useCallback, use } from 'react';
+import { useEffect, useState, useCallback, useRef, use } from 'react';
 import { useRouter } from 'next/navigation';
 import { Markdown, countMatches } from '@/components/Markdown';
 import type { ManifexSession, ManifestState, TreeNode, ConversationMessage, Question } from '@/lib/types';
 
 type StatusKind = 'idle' | 'thinking' | 'compiling' | 'saving' | 'success' | 'error';
 
+// ── Preview Bridge Script (injected into compiled HTML) ──
+const PREVIEW_BRIDGE_SCRIPT = `<script>
+// Click-to-identify: walk up DOM to find data-doc-page, notify parent
+document.addEventListener('click', function(e) {
+  var el = e.target;
+  while (el && el !== document.body) {
+    if (el.dataset && el.dataset.docPage) {
+      window.parent.postMessage({ type: 'doc-navigate', page: el.dataset.docPage, section: el.dataset.docSection || '' }, '*');
+      e.preventDefault();
+      return;
+    }
+    el = el.parentElement;
+  }
+});
+// Hover-to-highlight: parent sends highlight/clear messages
+var currentHighlights = [];
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'highlight') {
+    currentHighlights.forEach(function(el) { el.style.outline = ''; el.style.outlineOffset = ''; });
+    currentHighlights = [];
+    var selector = '[data-doc-section="' + e.data.section + '"]';
+    if (e.data.page) selector = '[data-doc-page="' + e.data.page + '"]' + (e.data.section ? '[data-doc-section="' + e.data.section + '"]' : '');
+    var els = document.querySelectorAll(selector);
+    els.forEach(function(el) {
+      el.style.outline = '2px solid rgba(217, 119, 6, 0.4)';
+      el.style.outlineOffset = '4px';
+      currentHighlights.push(el);
+    });
+  }
+  if (e.data && e.data.type === 'highlight-clear') {
+    currentHighlights.forEach(function(el) { el.style.outline = ''; el.style.outlineOffset = ''; });
+    currentHighlights = [];
+  }
+});
+</script>`;
+
 // ── Sidebar Tree ──
+
+function pageIcon(path: string, title: string): string {
+  const p = path.toLowerCase();
+  const t = title.toLowerCase();
+  if (p === '_build-history') return '📜';
+  if (p.includes('overview') || t.includes('overview')) return '📋';
+  if (p.includes('architect') || t.includes('architect')) return '🏗';
+  if (p.includes('style') || t.includes('style')) return '🎨';
+  if (p.includes('api') || t.includes('api')) return '📡';
+  if (p.includes('data') || t.includes('data')) return '📊';
+  if (p.includes('auth') || t.includes('auth')) return '🔐';
+  if (p.includes('ui') || t.includes('spec')) return '🖥';
+  return '📄';
+}
 
 function TreeItem({ node, activePath, changedPaths, onSelect, depth = 0 }: {
   node: TreeNode;
@@ -33,24 +83,27 @@ function TreeItem({ node, activePath, changedPaths, onSelect, depth = 0 }: {
           padding: '6px 12px',
           paddingLeft: `${12 + depth * 16}px`,
           border: 'none',
-          borderRadius: '6px',
+          borderLeft: isActive ? '3px solid var(--accent)' : '3px solid transparent',
+          borderRadius: '0 6px 6px 0',
           background: isActive ? 'var(--accent-soft)' : 'transparent',
           color: isActive ? 'var(--accent)' : 'var(--text)',
           fontWeight: isActive ? 600 : 400,
           fontSize: '13px',
           cursor: 'pointer',
-          transition: 'background 0.1s',
+          transition: 'all 0.15s ease',
         }}
         onMouseEnter={e => { if (!isActive) (e.target as HTMLElement).style.background = 'rgba(0,0,0,0.03)'; }}
         onMouseLeave={e => { if (!isActive) (e.target as HTMLElement).style.background = 'transparent'; }}
       >
-        {hasChildren && (
+        {hasChildren ? (
           <span
             onClick={e => { e.stopPropagation(); setExpanded(!expanded); }}
-            style={{ fontSize: '10px', color: 'var(--text-dim)', width: '12px', textAlign: 'center' }}
+            style={{ fontSize: '10px', color: 'var(--text-dim)', width: '14px', textAlign: 'center' }}
           >
             {expanded ? '▾' : '▸'}
           </span>
+        ) : (
+          <span style={{ fontSize: '12px', width: '14px', textAlign: 'center' }}>{pageIcon(node.path, node.title)}</span>
         )}
         <span style={{ flex: 1 }}>{node.title}</span>
         {isChanged && (
@@ -137,6 +190,29 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     const el = document.querySelector('.mx-search-active');
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }, [activeMatchIdx, pageSearch]);
+
+  // Preview ↔ Docs bridge: listen for click-to-identify from iframe
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === 'doc-navigate' && e.data.page) {
+        setActivePage(e.data.page);
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, []);
+
+  // Send highlight message to iframe
+  const highlightInPreview = useCallback((section: string | null) => {
+    const iframe = iframeRef.current;
+    if (!iframe?.contentWindow) return;
+    if (section) {
+      iframe.contentWindow.postMessage({ type: 'highlight', page: activePage, section }, '*');
+    } else {
+      iframe.contentWindow.postMessage({ type: 'highlight-clear' }, '*');
+    }
+  }, [activePage]);
 
   const showToast = (kind: 'success' | 'error', msg: string) => setToast({ kind, msg });
 
@@ -649,14 +725,14 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             )}
 
             {/* Page content */}
-            <div style={{
+            <div key={effectiveActivePage} className="mx-page-content" style={{
               flex: 1,
               overflow: 'auto',
               padding: '32px 40px',
               opacity: status === 'thinking' ? 0.6 : 1,
               transition: 'opacity 0.2s ease',
             }}>
-              <Markdown content={pageContent} diffAgainst={diffAgainst} searchTerm={pageSearch} activeMatchIndex={activeMatchIdx} />
+              <Markdown content={pageContent} diffAgainst={diffAgainst} searchTerm={pageSearch} activeMatchIndex={activeMatchIdx} onSectionHover={highlightInPreview} />
               {pending && changedPaths.has(effectiveActivePage) && pending.diff_summary && (
                 <div style={{
                   marginTop: '24px',
@@ -693,7 +769,9 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             minHeight: '32px',
           }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ textTransform: 'uppercase', letterSpacing: '0.05em' }}>Preview</span>
+              <span style={{ fontWeight: 500, color: 'var(--text)' }}>
+                {currentState.pages['overview']?.title || 'Preview'}
+              </span>
               {compiling && <span style={{ color: 'var(--accent)' }}>Updating…</span>}
             </span>
             {previewHtml && (
@@ -753,7 +831,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                 </button>
               </div>
             ) : previewHtml ? (
-              <iframe data-testid="preview-iframe" srcDoc={previewHtml} style={{ width: '100%', height: '100%', border: 'none' }} />
+              <iframe ref={iframeRef} data-testid="preview-iframe" srcDoc={previewHtml + PREVIEW_BRIDGE_SCRIPT} style={{ width: '100%', height: '100%', border: 'none' }} />
             ) : (
               <div style={{ padding: '40px 24px', color: '#6b7280', textAlign: 'center' }}>
                 Describe what you want below and your app will appear here.
@@ -811,7 +889,12 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             }}
           >
             <span>{conversationOpen ? '▾' : '▸'}</span>
-            <span>Conversation ({conversation.length} messages)</span>
+            <span>Conversation ({conversation.length})</span>
+            {!conversationOpen && conversation.length > 0 && (
+              <span style={{ color: 'var(--text-muted)', marginLeft: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '300px' }}>
+                — {conversation[conversation.length - 1].content.slice(0, 60)}
+              </span>
+            )}
           </button>
         )}
 
@@ -957,19 +1040,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         {suggestions.length > 0 && !prompt && !pending && !busy && (
           <div style={{ padding: '6px 24px 0', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
             {suggestions.map(s => (
-              <button
-                key={s}
-                onClick={() => { setPrompt(s); }}
-                style={{
-                  background: 'var(--accent-soft)',
-                  border: '1px solid rgba(217,119,6,0.15)',
-                  borderRadius: '16px',
-                  padding: '4px 12px',
-                  fontSize: '12px',
-                  color: 'var(--accent)',
-                  cursor: 'pointer',
-                }}
-              >
+              <button key={s} className="mx-suggestion" onClick={() => setPrompt(s)}>
                 {s}
               </button>
             ))}
@@ -993,7 +1064,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             style={{ flex: 1, resize: 'none', fontFamily: 'var(--font-sans)' }}
           />
           <button data-testid="submit-prompt-btn" onClick={submitPrompt} disabled={busy || !prompt.trim()} className="mx-btn mx-btn-primary">
-            {status === 'thinking' ? <><span className="mx-spinner" /> Thinking…</> : 'Tell me'}
+            {status === 'thinking' ? <><span className="mx-typing-dots"><span /><span /><span /></span></> : 'Tell me'}
           </button>
         </div>
       </footer>
