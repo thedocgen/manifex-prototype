@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getProject, createSession, STARTER_MANIFEST, makeManifestState } from '@/lib/store';
+import { getProject, createSession, makeStarterManifest } from '@/lib/store';
 import { LOCAL_DEV_USER } from '@/lib/types';
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -11,7 +11,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     project_id: projectId,
     user_id: LOCAL_DEV_USER.id,
     base_commit_sha: 'local-init',
-    manifest_state: makeManifestState(STARTER_MANIFEST),
+    manifest_state: makeStarterManifest(),
   });
 
   return NextResponse.json({ session });

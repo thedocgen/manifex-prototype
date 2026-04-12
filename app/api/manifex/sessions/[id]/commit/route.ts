@@ -18,20 +18,35 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     }, { status: 400 });
   }
 
+  // Build file list: each page as manifest/<path>.md + tree.json + lock
+  const files: { path: string; content: string }[] = [];
+
+  for (const [pagePath, page] of Object.entries(session.manifest_state.pages)) {
+    files.push({
+      path: `manifest/${pagePath}.md`,
+      content: page.content,
+    });
+  }
+
+  files.push({
+    path: 'manifest/tree.json',
+    content: JSON.stringify(session.manifest_state.tree, null, 2) + '\n',
+  });
+
   const lock = JSON.stringify({
     manifest_sha: session.manifest_state.sha,
-    compiler_version: 'manifex-claude-sonnet-4-v1',
+    compiler_version: 'manifex-claude-sonnet-4-v2',
     committed_at: new Date().toISOString(),
     project_id: project.id,
+    page_count: Object.keys(session.manifest_state.pages).length,
   }, null, 2);
+
+  files.push({ path: 'manifex.lock', content: lock + '\n' });
 
   try {
     const result = await commitFiles(
       repo,
-      [
-        { path: 'manifest/main.md', content: session.manifest_state.content },
-        { path: 'manifex.lock', content: lock + '\n' },
-      ],
+      files,
       `manifex: commit session ${id} (sha ${session.manifest_state.sha.slice(0, 12)})`
     );
 

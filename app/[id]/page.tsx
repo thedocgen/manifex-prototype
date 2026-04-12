@@ -2,7 +2,18 @@
 import { useEffect, useState, use } from 'react';
 import { useRouter } from 'next/navigation';
 import { Markdown } from '@/components/Markdown';
-import type { ManifexSession } from '@/lib/types';
+import type { ManifexSession, ManifestState } from '@/lib/types';
+
+/** Get first page content from a ManifestState (interim helper until sidebar UI) */
+function getFirstPageContent(state: ManifestState): string {
+  if (state.tree.length > 0) {
+    const firstPath = state.tree[0].path;
+    if (state.pages[firstPath]) return state.pages[firstPath].content;
+  }
+  const paths = Object.keys(state.pages);
+  if (paths.length > 0) return state.pages[paths[0]].content;
+  return '';
+}
 
 type StatusKind = 'idle' | 'thinking' | 'compiling' | 'saving' | 'success' | 'error';
 
@@ -109,8 +120,8 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   }
 
   const pending = session.pending_attempt;
-  const displayContent = pending ? pending.proposed_manifest.content : session.manifest_state.content;
-  const baseForDiff = pending ? session.manifest_state.content : null;
+  const displayContent = pending ? getFirstPageContent(pending.proposed_manifest) : getFirstPageContent(session.manifest_state);
+  const baseForDiff = pending ? getFirstPageContent(session.manifest_state) : null;
   const busy = status !== 'idle';
 
   return (

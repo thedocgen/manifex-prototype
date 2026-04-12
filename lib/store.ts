@@ -1,8 +1,8 @@
 // Supabase-backed store for Manifex.
-// Same interface as the previous in-memory version, but persists across server restarts.
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { ManifexProject, ManifexSession, ManifestState } from './types';
+import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex } from './types';
+import { migrateManifestState } from './types';
 import { sha256 } from './crypto';
 
 const SUPABASE_URL = process.env.SUPABASE_PROJECT_URL || '';
@@ -21,7 +21,12 @@ function client(): SupabaseClient {
   return _client;
 }
 
-export const STARTER_MANIFEST = `# My App
+// ── Starter content ──
+
+export const STARTER_PAGES: { [path: string]: DocPage } = {
+  overview: {
+    title: 'Overview',
+    content: `# My App
 
 ## Overview
 A simple web application built with Manifex.
@@ -31,14 +36,24 @@ A simple web application built with Manifex.
 
 ## Styles
 - Clean, modern design with system fonts
-- Light background, dark text
-`;
+- Light background, dark text`,
+  },
+};
 
-export function makeManifestState(content: string): ManifestState {
+export const STARTER_TREE: TreeNode[] = [
+  { path: 'overview', title: 'Overview' },
+];
+
+export function makeManifestState(pages: { [path: string]: DocPage }, tree: TreeNode[]): ManifestState {
   return {
-    content,
-    sha: sha256(content),
+    pages,
+    tree,
+    sha: sha256(JSON.stringify(pages)),
   };
+}
+
+export function makeStarterManifest(): ManifestState {
+  return makeManifestState(STARTER_PAGES, STARTER_TREE);
 }
 
 // ────────────────────────────────────────────────────────────
@@ -154,8 +169,6 @@ export async function updateSession(id: string, patch: Partial<ManifexSession>):
 // Compilation cache
 // ────────────────────────────────────────────────────────────
 
-import type { CompiledCodex } from './types';
-
 export async function getCachedCompilation(
   manifestSha: string,
   compilerVersion: string
@@ -171,11 +184,9 @@ export async function getCachedCompilation(
     return null;
   }
   if (!data) return null;
-  const files = data.codex_files;
-  // Reconstruct CompiledCodex shape
   return {
-    files,
-    codex_sha: manifestSha, // we use manifest_sha as the cache key
+    files: data.codex_files,
+    codex_sha: manifestSha,
     compiler_version: compilerVersion,
   };
 }
@@ -197,16 +208,32 @@ export async function putCachedCompilation(
   }
 }
 
+// ────────────────────────────────────────────────────────────
+// Row mappers (with migration)
+// ────────────────────────────────────────────────────────────
+
 function rowToSession(row: any): ManifexSession {
+  const manifestState = migrateManifestState(row.manifest_state);
+  const history = (row.history || []).map(migrateManifestState);
+  const redo_stack = (row.redo_stack || []).map(migrateManifestState);
+
+  let pending_attempt = row.pending_attempt;
+  if (pending_attempt && pending_attempt.proposed_manifest) {
+    pending_attempt = {
+      ...pending_attempt,
+      proposed_manifest: migrateManifestState(pending_attempt.proposed_manifest),
+    };
+  }
+
   return {
     id: row.id,
     project_id: row.project_id,
     user_id: row.user_id,
     base_commit_sha: row.base_commit_sha,
-    manifest_state: row.manifest_state,
-    history: row.history || [],
-    redo_stack: row.redo_stack || [],
-    pending_attempt: row.pending_attempt,
+    manifest_state: manifestState,
+    history,
+    redo_stack,
+    pending_attempt,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

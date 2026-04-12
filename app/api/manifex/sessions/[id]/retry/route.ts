@@ -11,13 +11,14 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const prompt = session.pending_attempt.prompt;
   const attemptNum = session.pending_attempt.attempt_number + 1;
 
-  const result = await editManifest(session.manifest_state.content, prompt, { variation: true });
+  const result = await editManifest(session.manifest_state, prompt, { variation: true });
 
   const updated = await updateSession(id, {
     pending_attempt: {
       prompt,
-      proposed_manifest: makeManifestState(result.new_manifest),
+      proposed_manifest: makeManifestState(result.pages, result.tree),
       diff_summary: result.diff_summary,
+      changed_pages: result.changed_pages,
       attempt_number: attemptNum,
     },
   });

@@ -8,7 +8,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
-  const COMPILER_VERSION = 'manifex-claude-sonnet-4-v1';
+  const COMPILER_VERSION = 'manifex-claude-sonnet-4-v2';
   const manifestSha = session.manifest_state.sha;
 
   // Check cache
@@ -17,7 +17,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     console.log(`[render] cache HIT for sha ${manifestSha.slice(0, 12)}`);
   } else {
     console.log(`[render] cache MISS for sha ${manifestSha.slice(0, 12)}, compiling…`);
-    compiled = await compileManifestToCodex(session.manifest_state.content);
+    compiled = await compileManifestToCodex(session.manifest_state);
     await putCachedCompilation(manifestSha, COMPILER_VERSION, compiled);
   }
 
