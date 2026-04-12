@@ -14,6 +14,9 @@ document.addEventListener('click', function(e) {
   while (el && el !== document.body) {
     if (el.dataset && el.dataset.docPage) {
       window.parent.postMessage({ type: 'doc-navigate', page: el.dataset.docPage, section: el.dataset.docSection || '' }, '*');
+      el.style.outline = '2px solid rgba(59, 130, 246, 0.6)';
+      el.style.outlineOffset = '2px';
+      setTimeout(function() { el.style.outline = ''; el.style.outlineOffset = ''; }, 800);
       e.preventDefault();
       return;
     }
@@ -135,7 +138,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [activeMatchIdx, setActiveMatchIdx] = useState(0);
   const [conversationOpen, setConversationOpen] = useState(false);
   const [conversation, setConversation] = useState<ConversationMessage[]>([]);
-  const [pendingImage, setPendingImage] = useState<{ base64: string; mediaType: string; previewUrl: string } | null>(null);
+  const [pendingFile, setPendingFile] = useState<{ type: 'image' | 'text' | 'pdf'; base64?: string; mediaType?: string; textContent?: string; fileName: string; previewUrl?: string } | null>(null);
 
   // Track whether conversation was loaded from server (skip persisting on restore)
   const convoLoadedRef = useRef(false);
@@ -206,6 +209,13 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     const handler = (e: MessageEvent) => {
       if (e.data?.type === 'doc-navigate' && e.data.page) {
         setActivePage(e.data.page);
+        const section = e.data.section ? e.data.section.replace(/-/g, ' ') : '';
+        const pageName = e.data.page.replace(/-/g, ' ');
+        setPrompt(`Change the ${section || pageName} in ${pageName}: `);
+        setTimeout(() => {
+          const textarea = document.querySelector('[data-testid="prompt-input"]') as HTMLTextAreaElement;
+          if (textarea) { textarea.focus(); textarea.setSelectionRange(textarea.value.length, textarea.value.length); }
+        }, 100);
       }
     };
     window.addEventListener('message', handler);
@@ -281,19 +291,24 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   };
 
   const submitPrompt = async () => {
-    if (!prompt.trim()) return;
-    const p = prompt;
+    if (!prompt.trim() && !pendingFile) return;
+    let p = prompt;
     setPrompt('');
     setConversationOpen(true);
+
+    // Prepend text file content to prompt if attached
+    if (pendingFile?.type === 'text' && pendingFile.textContent) {
+      p = `FILE CONTENT (${pendingFile.fileName}):\n\`\`\`\n${pendingFile.textContent}\n\`\`\`\n\n${p}`;
+    }
 
     // Add user message to local conversation
     const userMsg: ConversationMessage = {
       role: 'user',
-      content: p || '(image)',
-      imageUrl: pendingImage?.previewUrl,
+      content: p || (pendingFile ? `(${pendingFile.fileName})` : ''),
+      imageUrl: pendingFile?.type === 'image' ? pendingFile.previewUrl : undefined,
       timestamp: new Date().toISOString(),
     };
-    setPendingImage(null);
+    setPendingFile(null);
     const updatedConvo = [...conversation, userMsg];
     setConversation(updatedConvo);
 
@@ -320,7 +335,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         body: JSON.stringify({
           prompt: p,
           conversationContext: recentContext,
-          ...(pendingImage ? { image: { base64: pendingImage.base64, media_type: pendingImage.mediaType } } : {}),
+          ...(pendingFile && (pendingFile.type === 'image' || pendingFile.type === 'pdf') && pendingFile.base64 ? { image: { base64: pendingFile.base64, media_type: pendingFile.mediaType } } : {}),
         }),
       });
       const data = await res.json();
@@ -439,20 +454,25 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   };
 
   // ── Contextual prompt suggestions ──
-  const getSuggestions = (): string[] => {
+  const getSuggestions = (): { text: string; action: 'prompt' | 'link'; href?: string }[] => {
     if (pending || busy || Object.keys(currentState.pages).length <= 1) return [];
     const all = Object.values(currentState.pages).map(p => p.content).join(' ').toLowerCase();
-    const suggestions: string[] = [];
+    const suggestions: { text: string; action: 'prompt' | 'link'; href?: string }[] = [];
     if (!all.includes('database') && !all.includes('supabase') && !all.includes('storage'))
-      suggestions.push('Add a database to save data');
+      suggestions.push({ text: 'Add a database to save data', action: 'prompt' });
     if (!all.includes('auth') && !all.includes('login') && !all.includes('signup'))
-      suggestions.push('Add user accounts');
+      suggestions.push({ text: 'Add user accounts', action: 'prompt' });
     if (!all.includes('responsive') && !all.includes('mobile'))
-      suggestions.push('Make it work on mobile');
+      suggestions.push({ text: 'Make it work on mobile', action: 'prompt' });
     if (!all.includes('dark mode') && !all.includes('dark theme'))
-      suggestions.push('Add a dark mode toggle');
+      suggestions.push({ text: 'Add a dark mode toggle', action: 'prompt' });
     if (!all.includes('search') && !all.includes('filter'))
-      suggestions.push('Add search or filtering');
+      suggestions.push({ text: 'Add search or filtering', action: 'prompt' });
+    // Connector-aware suggestions
+    if ((all.includes('image') || all.includes('photo') || all.includes('picture')) && !all.includes('image generation connector'))
+      suggestions.push({ text: 'Connect image generation', action: 'link', href: '/connectors' });
+    if (previewHtml && !all.includes('deploy connector'))
+      suggestions.push({ text: 'Publish your app', action: 'link', href: '/connectors' });
     return suggestions.slice(0, 3);
   };
   const suggestions = getSuggestions();
@@ -1108,19 +1128,35 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         {suggestions.length > 0 && !prompt && !pending && !busy && (
           <div style={{ padding: '6px 24px 0', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
             {suggestions.map(s => (
-              <button key={s} className="mx-suggestion" onClick={() => setPrompt(s)}>
-                {s}
+              <button key={s.text} className="mx-suggestion" onClick={() => {
+                if (s.action === 'link' && s.href) {
+                  router.push(s.href);
+                } else {
+                  setPrompt(s.text);
+                }
+              }}>
+                {s.text}
               </button>
             ))}
           </div>
         )}
 
-        {/* Image preview */}
-        {pendingImage && (
+        {/* File preview */}
+        {pendingFile && (
           <div style={{ padding: '6px 24px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <img src={pendingImage.previewUrl} alt="Upload" style={{ height: '40px', borderRadius: '6px', border: '1px solid var(--border)' }} />
-            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>Image attached</span>
-            <button onClick={() => setPendingImage(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', fontSize: '14px' }}>✕</button>
+            {pendingFile.type === 'image' && pendingFile.previewUrl && (
+              <img src={pendingFile.previewUrl} alt="Upload" style={{ height: '40px', borderRadius: '6px', border: '1px solid var(--border)' }} />
+            )}
+            {pendingFile.type === 'text' && (
+              <span style={{ fontSize: '12px', padding: '4px 8px', borderRadius: '4px', background: 'var(--bg-muted, #f0f0f0)', color: 'var(--text-muted)', fontFamily: 'monospace' }}>{pendingFile.fileName}</span>
+            )}
+            {pendingFile.type === 'pdf' && (
+              <span style={{ fontSize: '12px', padding: '4px 8px', borderRadius: '4px', background: 'var(--bg-muted, #f0f0f0)', color: 'var(--text-muted)' }}>📄 {pendingFile.fileName}</span>
+            )}
+            <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+              {pendingFile.type === 'image' ? 'Image' : pendingFile.type === 'pdf' ? 'PDF' : 'File'} attached
+            </span>
+            <button onClick={() => setPendingFile(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-dim)', fontSize: '14px' }}>✕</button>
           </div>
         )}
 
@@ -1130,28 +1166,51 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             <button data-testid="undo-btn" onClick={() => action('/undo', undefined, { statusMsg: 'Undoing…', autoRender: true })} disabled={busy || session.history.length === 0} className="mx-btn mx-btn-ghost" title="Undo" style={{ padding: '6px 8px', fontSize: '13px' }}>↶</button>
             <button data-testid="redo-btn" onClick={() => action('/redo', undefined, { statusMsg: 'Redoing…', autoRender: true })} disabled={busy || session.redo_stack.length === 0} className="mx-btn mx-btn-ghost" title="Redo" style={{ padding: '6px 8px', fontSize: '13px' }}>↷</button>
           </div>
-          {/* Image upload */}
+          {/* File upload */}
           <input
             type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp"
+            accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.csv,.json,.txt,.js,.py,.html,.css"
             id="image-upload"
             style={{ display: 'none' }}
             onChange={e => {
               const file = e.target.files?.[0];
               if (!file) return;
-              // Resize to max 1024px width
-              const img = new Image();
-              img.onload = () => {
-                const maxW = 1024;
-                const scale = img.width > maxW ? maxW / img.width : 1;
-                const canvas = document.createElement('canvas');
-                canvas.width = img.width * scale;
-                canvas.height = img.height * scale;
-                canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height);
-                const base64 = canvas.toDataURL(file.type).split(',')[1];
-                setPendingImage({ base64, mediaType: file.type, previewUrl: URL.createObjectURL(file) });
-              };
-              img.src = URL.createObjectURL(file);
+              const fileName = file.name;
+              const ext = fileName.split('.').pop()?.toLowerCase() || '';
+              const textExtensions = ['txt', 'csv', 'json', 'js', 'py', 'html', 'css'];
+
+              if (file.type.startsWith('image/')) {
+                // Image: resize to max 1024px width, base64 encode
+                const img = new Image();
+                img.onload = () => {
+                  const maxW = 1024;
+                  const scale = img.width > maxW ? maxW / img.width : 1;
+                  const canvas = document.createElement('canvas');
+                  canvas.width = img.width * scale;
+                  canvas.height = img.height * scale;
+                  canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height);
+                  const base64 = canvas.toDataURL(file.type).split(',')[1];
+                  setPendingFile({ type: 'image', base64, mediaType: file.type, fileName, previewUrl: URL.createObjectURL(file) });
+                };
+                img.src = URL.createObjectURL(file);
+              } else if (ext === 'pdf') {
+                // PDF: read as base64
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const dataUrl = reader.result as string;
+                  const base64 = dataUrl.split(',')[1];
+                  setPendingFile({ type: 'pdf', base64, mediaType: 'application/pdf', fileName });
+                };
+                reader.readAsDataURL(file);
+              } else if (textExtensions.includes(ext)) {
+                // Text-based file: read as text
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const textContent = reader.result as string;
+                  setPendingFile({ type: 'text', textContent, fileName });
+                };
+                reader.readAsText(file);
+              }
               e.target.value = '';
             }}
           />
@@ -1159,10 +1218,10 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             onClick={() => document.getElementById('image-upload')?.click()}
             disabled={busy}
             className="mx-btn mx-btn-ghost"
-            title="Attach an image"
+            title="Attach a file"
             style={{ padding: '6px 10px', fontSize: '12px' }}
           >
-            + Image
+            Attach
           </button>
           <textarea
             data-testid="prompt-input"
@@ -1174,7 +1233,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             rows={1}
             style={{ flex: 1, resize: 'none', fontFamily: 'var(--font-sans)' }}
           />
-          <button data-testid="submit-prompt-btn" onClick={submitPrompt} disabled={busy || (!prompt.trim() && !pendingImage)} className="mx-btn mx-btn-primary">
+          <button data-testid="submit-prompt-btn" onClick={submitPrompt} disabled={busy || (!prompt.trim() && !pendingFile)} className="mx-btn mx-btn-primary">
             {status === 'thinking' ? <><span className="mx-typing-dots"><span /><span /><span /></span></> : 'Tell me'}
           </button>
         </div>

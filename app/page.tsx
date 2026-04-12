@@ -249,6 +249,10 @@ export default function HomePage() {
         <a href="/about" style={{ color: 'var(--text-dim)', textDecoration: 'underline' }}>
           Why is Manifex different?
         </a>
+        <span style={{ margin: '0 8px' }}>·</span>
+        <a href="/connectors" style={{ color: 'var(--text-dim)', textDecoration: 'underline' }}>
+          Connectors
+        </a>
       </footer>
     </div>
   );
