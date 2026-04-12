@@ -180,24 +180,28 @@ input:focus, textarea:focus {
   color: var(--text);
 }
 .mx-md h1 {
-  font-family: var(--font-serif);
-  font-size: 32px;
-  font-weight: 600;
+  font-family: var(--font-sans);
+  font-size: 28px;
+  font-weight: 700;
   margin: 0 0 16px;
   letter-spacing: -0.02em;
+  color: var(--text);
 }
 .mx-md h2 {
-  font-family: var(--font-serif);
-  font-size: 22px;
+  font-family: var(--font-sans);
+  font-size: 18px;
   font-weight: 600;
-  margin: 32px 0 12px;
-  color: var(--accent);
+  margin: 28px 0 10px;
+  color: var(--text);
   letter-spacing: -0.01em;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
 }
 .mx-md h3 {
-  font-size: 17px;
+  font-size: 15px;
   font-weight: 600;
-  margin: 24px 0 8px;
+  margin: 20px 0 6px;
+  color: var(--text);
 }
 .mx-md p { margin: 0 0 14px; }
 .mx-md ul {

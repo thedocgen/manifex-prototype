@@ -104,27 +104,24 @@ export default function HomePage() {
         <div style={{ textAlign: 'center', marginBottom: '48px' }}>
           <h1 style={{
             fontFamily: 'var(--font-serif)',
-            fontSize: '52px',
+            fontSize: '48px',
             fontWeight: 700,
             letterSpacing: '-0.03em',
-            margin: '0 0 12px',
+            margin: '0 0 16px',
             lineHeight: 1.1,
           }}>
             Manifex
           </h1>
           <p style={{
-            fontFamily: 'var(--font-serif)',
-            fontSize: '24px',
-            fontWeight: 400,
+            fontSize: '18px',
             color: 'var(--text-muted)',
-            margin: '0 0 8px',
-            fontStyle: 'italic',
+            margin: '0 0 40px',
+            lineHeight: 1.6,
+            maxWidth: '480px',
+            marginLeft: 'auto',
+            marginRight: 'auto',
           }}>
-            Tell it. Get it.
-          </p>
-          <p style={{ fontSize: '16px', color: 'var(--text-dim)', margin: '0 0 40px', lineHeight: 1.5 }}>
-            Describe what you want and watch it come to life.<br />
-            No code. No templates. Just your words.
+            Describe an app in plain language. Get a working product with full documentation.
           </p>
 
           {/* Main prompt input */}
@@ -145,7 +142,7 @@ export default function HomePage() {
                   createFromPrompt(prompt);
                 }
               }}
-              placeholder="What do you want to build?"
+              placeholder="Describe what you want to build..."
               disabled={creating}
               rows={2}
               style={{
@@ -172,19 +169,20 @@ export default function HomePage() {
         {TEMPLATES.length > 0 && (
           <div style={{ marginBottom: '48px' }}>
             <h2 style={{
-              fontFamily: 'var(--font-serif)',
-              fontSize: '20px',
-              fontWeight: 600,
-              color: 'var(--text-muted)',
+              fontSize: '14px',
+              fontWeight: 500,
+              color: 'var(--text-dim)',
               margin: '0 0 16px',
               textAlign: 'center',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
             }}>
-              Quick start — loads instantly
+              Start from a template
             </h2>
             <div style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
-              gap: '12px',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+              gap: '16px',
             }}>
               {TEMPLATES.map(t => (
                 <button
@@ -192,12 +190,12 @@ export default function HomePage() {
                   onClick={() => createFromTemplate(t.id)}
                   disabled={creating}
                   className="mx-card"
-                  style={{ textAlign: 'left', border: '1px solid var(--border)' }}
+                  style={{ textAlign: 'left', border: '1px solid var(--border)', padding: '20px 24px' }}
                 >
-                  <div style={{ fontSize: '15px', fontWeight: 600, fontFamily: 'var(--font-serif)', marginBottom: '4px' }}>
+                  <div style={{ fontSize: '15px', fontWeight: 600, marginBottom: '6px', color: 'var(--text)' }}>
                     {t.name}
                   </div>
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                  <div style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: 1.5 }}>
                     {t.description}
                   </div>
                 </button>
@@ -206,19 +204,21 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Existing builds */}
-        {loaded && builds.length > 0 && (
+        {/* Existing apps */}
+        {loaded && builds.filter(b => !b.name.startsWith('TPL:') && !b.name.startsWith('R3 ') && !b.name.startsWith('R4 ')).length > 0 && (
           <div>
             <h2 style={{
-              fontFamily: 'var(--font-serif)',
-              fontSize: '20px',
-              fontWeight: 600,
-              margin: '0 0 16px',
+              fontSize: '14px',
+              fontWeight: 500,
+              color: 'var(--text-dim)',
+              margin: '0 0 12px',
+              textTransform: 'uppercase',
+              letterSpacing: '0.05em',
             }}>
-              Your Builds
+              Your apps
             </h2>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {builds.map(b => (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+              {builds.filter(b => !b.name.startsWith('TPL:') && !b.name.startsWith('R3 ') && !b.name.startsWith('R4 ')).map(b => (
                 <div
                   key={b.id}
                   className="mx-card"

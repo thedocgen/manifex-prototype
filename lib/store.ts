@@ -26,17 +26,18 @@ function client(): SupabaseClient {
 export const STARTER_PAGES: { [path: string]: DocPage } = {
   overview: {
     title: 'Overview',
-    content: `# My App
+    content: `# New Project
 
-## Overview
-A simple web application built with Manifex.
+Describe what you want to build using the prompt bar below. Manifex will create your app and generate full documentation for it.
 
-## Pages
-- Home page with a welcome message
+## Getting Started
 
-## Styles
-- Clean, modern design with system fonts
-- Light background, dark text`,
+Type a description of your app — what it does, who it's for, how it should look. The more detail you provide, the better the result.
+
+For example:
+- "A booking page for my yoga studio with class schedule and signup"
+- "A project dashboard with tasks, deadlines, and team assignments"
+- "A recipe app where I can save and search my favorite meals"`,
   },
 };
 

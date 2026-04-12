@@ -484,7 +484,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           {busy && <span className="mx-status"><span className="dot" />{statusMsg}</span>}
-          <button onClick={() => showToast('success', 'Saved!')} className="mx-btn mx-btn-success" style={{ padding: '6px 14px', fontSize: '13px' }}>
+          <button onClick={() => showToast('success', 'Saved!')} className="mx-btn mx-btn-secondary" style={{ padding: '6px 14px', fontSize: '13px' }}>
             Save
           </button>
         </div>
@@ -1132,17 +1132,17 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             onClick={() => document.getElementById('image-upload')?.click()}
             disabled={busy}
             className="mx-btn mx-btn-ghost"
-            title="Attach image"
-            style={{ padding: '6px 8px', fontSize: '16px' }}
+            title="Attach an image"
+            style={{ padding: '6px 10px', fontSize: '12px' }}
           >
-            Attach
+            + Image
           </button>
           <textarea
             data-testid="prompt-input"
             value={prompt}
             onChange={e => setPrompt(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); } }}
-            placeholder="Tell me what you want to change…"
+            placeholder="Describe what you want..."
             disabled={busy}
             rows={1}
             style={{ flex: 1, resize: 'none', fontFamily: 'var(--font-sans)' }}
