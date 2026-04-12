@@ -9,7 +9,7 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
 
   // Check for a cached compilation of the current manifest. If present,
   // return the inlined HTML so the frontend can auto-populate the iframe.
-  const COMPILER_VERSION = 'manifex-claude-sonnet-4-v2';
+  const COMPILER_VERSION = 'manifex-claude-sonnet-4-v3';
   const cached = await getCachedCompilation(session.manifest_state.sha, COMPILER_VERSION);
   let inlined_html: string | null = null;
   if (cached) {

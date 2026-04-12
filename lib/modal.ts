@@ -6,7 +6,7 @@ import { sha256 } from './crypto';
 import type { CompiledCodex, ManifestState, DocPage, TreeNode, Question, ConversationMessage } from './types';
 import { serializePages } from './types';
 
-const COMPILER_VERSION = 'manifex-claude-sonnet-4-v2';
+const COMPILER_VERSION = 'manifex-claude-sonnet-4-v3';
 const MODEL = 'claude-sonnet-4-5-20250929';
 
 let _client: Anthropic | null = null;
@@ -44,7 +44,12 @@ When asking about external services, be a patient guide. Non-technical users sho
 
 When using update_docs:
 - Return ALL pages, not just changed ones. Unchanged pages must be included as-is.
-- If this is the FIRST REAL PROMPT (only a basic "Overview" page exists), scaffold a complete doc structure (Overview, Architecture, UI Specs, Styles, plus domain-specific pages).
+- If this is the FIRST REAL PROMPT (only a basic "Overview" page exists), scaffold a complete doc structure using plain-language page names that non-developers can understand:
+  - "Overview" — what the app does
+  - "How It Works" (not "Architecture") — technical approach, framework, patterns
+  - "Pages and Layout" (not "UI Specifications") — what each page/section contains
+  - "Look and Feel" (not "Styles") — colors, fonts, spacing, visual design
+  - Plus domain-specific pages as needed (e.g. "Data and Storage", "User Accounts")
 - Technical pages document real decisions. Product pages describe what the app does.
 - Page paths use lowercase with hyphens. Each page's content is markdown starting with a heading.
 - changed_pages lists paths of modified/created/removed pages.
@@ -351,7 +356,7 @@ CONTENT QUALITY:
 - Generate real, contextual placeholder content appropriate for the app type
 - Never use "Lorem ipsum" or generic placeholders
 - Use realistic sample data (names, dates, descriptions that fit the domain)
-- Icons: use Unicode symbols or SVG — no emoji
+- NEVER use emojis in generated output. Use SVG icons, simple Unicode symbols (arrows, bullets, dashes), or text labels instead. The output must be professional.
 
 CODE RULES:
 - Read ALL documentation pages to understand the full app spec
