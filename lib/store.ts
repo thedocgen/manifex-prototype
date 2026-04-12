@@ -28,16 +28,14 @@ export const STARTER_PAGES: { [path: string]: DocPage } = {
     title: 'Overview',
     content: `# New Project
 
-Describe what you want to build using the prompt bar below. Manifex will create your app and generate full documentation for it.
+Describe your app idea below. Manifex will work with you to plan the documentation structure, then generate thorough technical docs covering architecture, pages, data models, and visual design. Once the documentation is complete, build your app with one click.
 
-## Getting Started
+## What to include in your description
 
-Type a description of your app — what it does, who it's for, how it should look. The more detail you provide, the better the result.
-
-For example:
-- "A booking page for my yoga studio with class schedule and signup"
-- "A project dashboard with tasks, deadlines, and team assignments"
-- "A recipe app where I can save and search my favorite meals"`,
+- **Who uses it** — the target audience or user roles
+- **What it does** — the core functionality and purpose
+- **Key features** — the main capabilities you need
+- **Design preferences** — any style, layout, or branding direction`,
   },
 };
 

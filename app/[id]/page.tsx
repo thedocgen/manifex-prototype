@@ -827,6 +827,25 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                 Open in new tab
               </button>
             )}
+            {previewHtml && (
+              <button
+                className="mx-btn mx-btn-secondary"
+                onClick={() => {
+                  const blob = new Blob([previewHtml], { type: 'text/html' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = 'manifex-app.html';
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                }}
+                style={{ padding: '3px 8px', fontSize: '11px' }}
+              >
+                Download
+              </button>
+            )}
           </div>
           <div style={{ flex: 1, background: '#fff', position: 'relative' }}>
             {compiling && (
@@ -853,31 +872,11 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                 ) : (
                   <div>
                     <p style={{ fontSize: '20px', fontWeight: 600, color: 'var(--text)', margin: '0 0 8px' }}>
-                      What are you building?
+                      Your app will appear here
                     </p>
-                    <p style={{ fontSize: '14px', color: 'var(--text-dim)', margin: '0 0 20px' }}>
-                      Describe it below, or try one of these:
+                    <p style={{ fontSize: '14px', color: 'var(--text-dim)', margin: 0 }}>
+                      Your app will appear here once documentation is complete and you click Build.
                     </p>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxWidth: '360px', margin: '0 auto' }}>
-                      {['A booking system for my yoga studio', 'A dashboard to track my reading goals', 'A fan page for my cat'].map(ex => (
-                        <button
-                          key={ex}
-                          onClick={() => setPrompt(ex)}
-                          style={{
-                            background: 'var(--accent-soft)',
-                            border: '1px solid rgba(59,130,246,0.12)',
-                            borderRadius: '6px',
-                            padding: '10px 16px',
-                            fontSize: '13px',
-                            color: 'var(--accent)',
-                            cursor: 'pointer',
-                            textAlign: 'left',
-                          }}
-                        >
-                          {ex}
-                        </button>
-                      ))}
-                    </div>
                   </div>
                 )}
               </div>
