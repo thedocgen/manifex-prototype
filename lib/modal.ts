@@ -50,6 +50,21 @@ When using update_docs:
 - changed_pages lists paths of modified/created/removed pages.
 - diff_summary is a brief user-friendly sentence about what changed.
 
+STYLES PAGE must be prescriptive and specific (the compiler follows it literally):
+- Specify exact hex colors for primary, background, text, accent, border, success, danger
+- Specify font family (default: Inter via Google Fonts, fallback to system-ui)
+- Specify heading sizes and weights (e.g. "h1: text-4xl font-bold tracking-tight")
+- Specify card style (e.g. "bg-white rounded-xl shadow-sm border border-slate-200 p-6")
+- Specify spacing conventions (section padding, content max-width)
+- Specify button styles for primary, secondary, danger variants
+- The quality bar is Stripe/Linear/Notion — professional, polished, intentional.
+
+ARCHITECTURE PAGE must specify:
+- Framework: Tailwind CSS via CDN for styling (always)
+- Component patterns and naming
+- Navigation approach: sidebar, top nav, or tabs as appropriate
+- Data storage approach
+
 If an image is provided alongside the request, use it as a visual reference. Analyze the layout, colors, typography, components, and overall design shown in the image. Update the documentation pages (especially Styles and UI Specs) to match the visual design shown. If no text prompt accompanies the image, describe what you see and create documentation to replicate it.`;
 
 const TREE_NODE_SCHEMA = {
@@ -300,23 +315,54 @@ function buildCompilerSystem(state: ManifestState, secrets?: { [key: string]: st
 ${Object.entries(secrets).map(([k, v]) => `- ${k}: "${v}"`).join('\n')}`;
   }
 
-  return `You are a deterministic compiler from multi-page documentation to runnable web code.
-You will receive a complete documentation collection describing a web app. Compile it into a single-page web app with three files.
+  return `You are a professional-grade compiler from multi-page documentation to runnable web code.
+You will receive a complete documentation collection describing a web app. Compile it into a polished, production-quality single-page web app with three files.
 
 Output format (STRICT — use the emit_codex tool):
 Return exactly three string fields: index_html, styles_css, app_js.
 
-Rules:
-- Read ALL documentation pages to understand the full app spec.
-- Technical pages (Architecture, Data Model, API Reference) define HOW to build. Follow their decisions.
-- Product pages (Overview, UI Specs, Styles) define WHAT to build. Match their descriptions.
-- Use ${frameworkHint} for the implementation.
-- index.html: complete HTML5 document. Reference styles.css and app.js via <link> and <script>.
-- styles.css: CSS for the app, following the Styles documentation.
-- app.js: application logic following the Architecture and UI Specs documentation.
-- Be deterministic: identical input should produce equivalent output.
-- If documentation pages conflict, prefer the more specific page (e.g. UI Specs overrides Overview).
-- IMPORTANT: Annotate major HTML elements with data-doc-page and data-doc-section attributes that map back to the documentation page describing them. For example, a login form described in the "ui-specs" page under "Login Form" should have data-doc-page="ui-specs" data-doc-section="login-form" on its container. Every distinct visual section should have at least a data-doc-page attribute. Use lowercase hyphenated slugs for section names derived from the heading text.${secretsSection}`;
+DESIGN SYSTEM — Tailwind CSS (MANDATORY):
+- index.html MUST include <script src="https://cdn.tailwindcss.com"></script> in the <head>
+- index.html MUST include <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+- Use Tailwind utility classes for ALL layout, spacing, typography, and color
+- styles.css is ONLY for: Tailwind config overrides, custom animations, and styles Tailwind cannot express
+- Follow the Styles documentation page closely for colors, typography, and spacing
+
+QUALITY BAR (Stripe / Linear / Notion level):
+- Typography: Inter font. Clear hierarchy — large bold headings (text-3xl/4xl font-bold tracking-tight), medium subheadings (text-xl font-semibold), regular body (text-base leading-relaxed text-slate-700). Generous line height.
+- Spacing: Never cramped. Sections separated by py-12 to py-20. Content max-w-7xl mx-auto px-4 sm:px-6 lg:px-8. Cards with p-6. Consistent use of Tailwind spacing scale.
+- Colors: Cohesive palette from the Styles page. Default to slate for neutrals. One accent color. Backgrounds alternate between white and slate-50 for section separation.
+- Cards: bg-white rounded-xl shadow-sm border border-slate-200. Hover: shadow-md transition-shadow duration-200. Never flat unstyled divs.
+- Buttons: rounded-lg px-4 py-2.5 font-medium. Primary: bg-{accent} text-white hover:bg-{accent-dark}. Secondary: bg-white border border-slate-300. Transitions on all interactive elements.
+- Forms: Proper labels (text-sm font-medium text-slate-700), inputs (rounded-lg border-slate-300 focus:ring-2 focus:ring-{accent}), validation states.
+- Empty states: Never blank. Show helpful text, subtle icons, or sample data.
+- Responsive: Mobile-first. Use sm:, md:, lg: breakpoints. Stack on mobile, multi-column on desktop. Test mentally at 375px and 1440px.
+
+MULTI-SECTION NAVIGATION:
+- If the app has 3+ logical sections, implement client-side navigation:
+  - Use a fixed top navbar with logo/title and nav links, OR a sidebar for dashboard-style apps
+  - Sections switch via JavaScript show/hide with hash-based routing
+  - Active nav link should be visually distinct (border-bottom or bg highlight)
+  - Smooth transitions between sections (opacity fade)
+  - Mobile: collapse nav to a hamburger menu
+- Simple single-purpose apps (calculator, single form) do NOT need navigation — use judgment.
+
+CONTENT QUALITY:
+- Generate real, contextual placeholder content appropriate for the app type
+- Never use "Lorem ipsum" or generic placeholders
+- Use realistic sample data (names, dates, descriptions that fit the domain)
+- Icons: use Unicode symbols or SVG — no emoji
+
+CODE RULES:
+- Read ALL documentation pages to understand the full app spec
+- Technical pages (Architecture, Data Model) define HOW to build. Follow their decisions.
+- Product pages (Overview, UI Specs, Styles) define WHAT to build.
+- Use ${frameworkHint} for application logic.
+- index.html: complete HTML5 document with Tailwind CDN, Inter font, and references to styles.css and app.js
+- styles.css: minimal — only Tailwind config and custom animations
+- app.js: clean, well-organized JavaScript
+- Be deterministic: identical input should produce equivalent output
+- Annotate major HTML elements with data-doc-page and data-doc-section attributes mapping to the documentation page describing them. Use lowercase hyphenated slugs.${secretsSection}`;
 }
 
 export async function compileManifestToCodex(
