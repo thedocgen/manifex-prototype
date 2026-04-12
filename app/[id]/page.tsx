@@ -174,15 +174,8 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     }
     if (data.inlined_html) {
       setPreviewHtml(data.inlined_html);
-    } else {
-      // Check for pre-built template HTML from sessionStorage
-      const templateHtml = sessionStorage.getItem(`template-html-${id}`);
-      if (templateHtml) {
-        setPreviewHtml(templateHtml);
-        sessionStorage.removeItem(`template-html-${id}`);
-      } else if (data.session) {
-        renderInBackground();
-      }
+    } else if (data.session) {
+      renderInBackground();
     }
   };
 
@@ -851,25 +844,6 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                 Open in new tab
               </button>
             )}
-            {previewHtml && (
-              <button
-                className="mx-btn mx-btn-secondary"
-                onClick={() => {
-                  const blob = new Blob([previewHtml], { type: 'text/html' });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement('a');
-                  a.href = url;
-                  a.download = 'manifex-app.html';
-                  document.body.appendChild(a);
-                  a.click();
-                  document.body.removeChild(a);
-                  URL.revokeObjectURL(url);
-                }}
-                style={{ padding: '3px 8px', fontSize: '11px' }}
-              >
-                Download
-              </button>
-            )}
           </div>
           <div style={{ flex: 1, background: '#fff', position: 'relative' }}>
             {compiling && (
@@ -1195,7 +1169,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             value={prompt}
             onChange={e => setPrompt(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitPrompt(); } }}
-            placeholder="Describe what you want..."
+            placeholder="What should we work on?"
             disabled={busy}
             rows={1}
             style={{ flex: 1, resize: 'none', fontFamily: 'var(--font-sans)' }}

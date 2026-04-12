@@ -1,8 +1,8 @@
 import './globals.css';
 
 export const metadata = {
-  title: 'Manifex — Your idea, fully documented',
-  description: 'Describe what you want to build. Get a working app with complete technical documentation.',
+  title: 'Manifex — Spec-driven development for visionaries',
+  description: 'Describe your idea. Get a thorough technical specification and a working app built from it.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

@@ -13,7 +13,7 @@ export default function AboutPage() {
         <Link href="/" style={{ textDecoration: 'none' }}>
           <span className="mx-brand-mark">Manifex</span>
         </Link>
-        <span className="mx-brand-tag">Your idea, fully documented.</span>
+        <span className="mx-brand-tag">Spec-driven development for visionaries.</span>
       </header>
 
       <main style={{ maxWidth: '680px', margin: '0 auto', padding: '64px 32px' }}>
@@ -118,7 +118,7 @@ export default function AboutPage() {
         color: 'var(--text-dim)',
         fontFamily: 'var(--font-sans)',
       }}>
-        Manifex by Manifex Labs · Your idea, fully documented.
+        Manifex by Manifex Labs · Spec-driven development for visionaries.
       </footer>
     </div>
   );
