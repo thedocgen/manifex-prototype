@@ -103,34 +103,35 @@ export default function HomePage() {
       <main style={{ maxWidth: '800px', margin: '0 auto', padding: '80px 32px 48px' }}>
         <div style={{ textAlign: 'center', marginBottom: '48px' }}>
           <h1 style={{
-            fontFamily: 'var(--font-serif)',
-            fontSize: '48px',
+            fontFamily: 'var(--font-sans)',
+            fontSize: '40px',
             fontWeight: 700,
             letterSpacing: '-0.03em',
-            margin: '0 0 16px',
-            lineHeight: 1.1,
+            margin: '0 0 12px',
+            lineHeight: 1.15,
+            color: 'var(--text)',
           }}>
             Manifex
           </h1>
           <p style={{
-            fontSize: '18px',
+            fontSize: '17px',
             color: 'var(--text-muted)',
-            margin: '0 0 40px',
+            margin: '0 0 36px',
             lineHeight: 1.6,
-            maxWidth: '480px',
+            maxWidth: '440px',
             marginLeft: 'auto',
             marginRight: 'auto',
           }}>
-            Describe an app in plain language. Get a working product with full documentation.
+            Your idea, fully documented. Describe what you want to build and get a working app with complete technical documentation.
           </p>
 
           {/* Main prompt input */}
           <div style={{
             background: 'var(--bg-card)',
             border: '1px solid var(--border)',
-            borderRadius: '16px',
+            borderRadius: '8px',
             padding: '20px',
-            boxShadow: '0 4px 16px rgba(0, 0, 0, 0.04)',
+            boxShadow: '0 1px 3px rgba(0, 0, 0, 0.06)',
           }}>
             <textarea
               data-testid="home-prompt-input"
@@ -226,7 +227,7 @@ export default function HomePage() {
                   data-testid={`build-${b.id}`}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-                    <h3 style={{ fontFamily: 'var(--font-serif)', fontSize: '18px', fontWeight: 600, margin: 0 }}>{b.name}</h3>
+                    <h3 style={{ fontSize: '16px', fontWeight: 600, margin: 0 }}>{b.name}</h3>
                     <span style={{ fontSize: '13px', color: 'var(--text-dim)' }}>{timeAgo(b.created_at)}</span>
                   </div>
                 </div>

@@ -18,7 +18,7 @@ export default function AboutPage() {
 
       <main style={{ maxWidth: '680px', margin: '0 auto', padding: '64px 32px' }}>
         <h1 style={{
-          fontFamily: 'var(--font-serif)',
+          fontFamily: 'var(--font-sans)',
           fontSize: '40px',
           fontWeight: 700,
           letterSpacing: '-0.03em',
@@ -36,7 +36,7 @@ export default function AboutPage() {
           </p>
 
           <h2 style={{
-            fontFamily: 'var(--font-serif)',
+            fontFamily: 'var(--font-sans)',
             fontSize: '24px',
             fontWeight: 600,
             margin: '48px 0 16px',
@@ -59,7 +59,7 @@ export default function AboutPage() {
           </p>
 
           <h2 style={{
-            fontFamily: 'var(--font-serif)',
+            fontFamily: 'var(--font-sans)',
             fontSize: '24px',
             fontWeight: 600,
             margin: '48px 0 16px',

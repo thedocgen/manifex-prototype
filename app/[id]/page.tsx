@@ -845,7 +845,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                   </div>
                 ) : (
                   <div>
-                    <p style={{ fontSize: '20px', fontFamily: 'var(--font-serif)', fontWeight: 600, color: 'var(--text)', margin: '0 0 8px' }}>
+                    <p style={{ fontSize: '20px', fontWeight: 600, color: 'var(--text)', margin: '0 0 8px' }}>
                       What are you building?
                     </p>
                     <p style={{ fontSize: '14px', color: 'var(--text-dim)', margin: '0 0 20px' }}>
