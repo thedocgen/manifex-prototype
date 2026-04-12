@@ -28,6 +28,20 @@ CREATE TABLE IF NOT EXISTS manifex_sessions (
 CREATE INDEX IF NOT EXISTS idx_manifex_sessions_project ON manifex_sessions(project_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_manifex_sessions_user ON manifex_sessions(user_id, updated_at DESC);
 
+-- R4: Secrets vault for API keys and credentials
+CREATE TABLE IF NOT EXISTS manifex_secrets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  project_id UUID NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE(project_id, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_manifex_secrets_project ON manifex_secrets(project_id);
+
+-- R4: Add conversation column to sessions (for existing DBs, run: ALTER TABLE manifex_sessions ADD COLUMN IF NOT EXISTS conversation JSONB DEFAULT '[]'::jsonb)
+
 CREATE TABLE IF NOT EXISTS manifex_compilations (
   manifest_sha TEXT NOT NULL,
   compiler_version TEXT NOT NULL,

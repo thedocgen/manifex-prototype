@@ -213,19 +213,23 @@ export async function putCachedCompilation(
 // ────────────────────────────────────────────────────────────
 
 export async function getSecrets(projectId: string): Promise<{ [key: string]: string }> {
-  const { data, error } = await client()
-    .from('manifex_secrets')
-    .select('key, value')
-    .eq('project_id', projectId);
-  if (error) {
-    console.warn('getSecrets error:', error.message);
+  try {
+    const { data, error } = await client()
+      .from('manifex_secrets')
+      .select('key, value')
+      .eq('project_id', projectId);
+    if (error) {
+      // Table might not exist yet — return empty
+      return {};
+    }
+    const result: { [key: string]: string } = {};
+    for (const row of (data || [])) {
+      result[row.key] = row.value;
+    }
+    return result;
+  } catch {
     return {};
   }
-  const result: { [key: string]: string } = {};
-  for (const row of (data || [])) {
-    result[row.key] = row.value;
-  }
-  return result;
 }
 
 // ────────────────────────────────────────────────────────────
