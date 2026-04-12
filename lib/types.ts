@@ -50,6 +50,8 @@ export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
   questions?: Question[];
+  diff_summary?: string;     // what changed (for timeline view)
+  changed_pages?: string[];  // which pages were affected
   timestamp: string;
 }
 

@@ -154,7 +154,6 @@ export async function updateSession(id: string, patch: Partial<ManifexSession>):
   if ('history' in patch) update.history = patch.history;
   if ('redo_stack' in patch) update.redo_stack = patch.redo_stack;
   if ('pending_attempt' in patch) update.pending_attempt = patch.pending_attempt;
-  if ('conversation' in patch) update.conversation = patch.conversation;
 
   const { data, error } = await client()
     .from('manifex_sessions')

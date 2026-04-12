@@ -95,6 +95,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [pageSearchOpen, setPageSearchOpen] = useState(false);
   const [activeMatchIdx, setActiveMatchIdx] = useState(0);
   const [conversationOpen, setConversationOpen] = useState(false);
+  const [conversation, setConversation] = useState<ConversationMessage[]>([]);
 
   const load = async () => {
     const res = await fetch(`/api/manifex/sessions/${id}`);
@@ -189,10 +190,62 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     if (!prompt.trim()) return;
     const p = prompt;
     setPrompt('');
-    setConversationOpen(true); // Show conversation when user sends a message
-    const data = await action('/prompt', { prompt: p }, { statusKind: 'thinking', statusMsg: 'Thinking…' });
-    // If the LLM asked a question, keep conversation open (already open)
-    // If it was an update, conversation stays open to show the exchange
+    setConversationOpen(true);
+
+    // Add user message to local conversation
+    const userMsg: ConversationMessage = { role: 'user', content: p, timestamp: new Date().toISOString() };
+    const updatedConvo = [...conversation, userMsg];
+    setConversation(updatedConvo);
+
+    // Pass recent conversation context to API for multi-turn
+    const recentContext = updatedConvo.slice(-6);
+
+    setStatus('thinking');
+    setStatusMsg('Thinking…');
+    try {
+      const res = await fetch(`/api/manifex/sessions/${id}/prompt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: p, conversationContext: recentContext }),
+      });
+      const data = await res.json();
+
+      if (data.response_type === 'question') {
+        // LLM asked a question
+        const assistantMsg: ConversationMessage = {
+          role: 'assistant',
+          content: data.message,
+          questions: data.questions,
+          timestamp: new Date().toISOString(),
+        };
+        setConversation(prev => [...prev, assistantMsg]);
+      } else {
+        // LLM updated docs
+        if (data.session) {
+          setSession(data.session);
+          const pa = data.session.pending_attempt;
+          if (pa?.changed_pages?.length > 0) setActivePage(pa.changed_pages[0]);
+        }
+        const pa = data.session?.pending_attempt;
+        const assistantMsg: ConversationMessage = {
+          role: 'assistant',
+          content: data.diff_summary || 'Changes applied.',
+          diff_summary: data.diff_summary,
+          changed_pages: pa?.changed_pages,
+          timestamp: new Date().toISOString(),
+        };
+        setConversation(prev => [...prev, assistantMsg]);
+      }
+
+      if (!res.ok) {
+        showToast('error', data.error || data.message || 'Something went wrong');
+      }
+    } catch (e: any) {
+      showToast('error', e.message || 'Network error');
+    } finally {
+      setStatus('idle');
+      setStatusMsg('');
+    }
   };
 
   const submitSecretAnswer = async (questionId: string, key: string, value: string) => {
@@ -657,7 +710,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         maxHeight: conversationOpen ? '40vh' : 'auto',
       }}>
         {/* Conversation toggle + thread */}
-        {session.conversation.length > 0 && (
+        {conversation.length > 0 && (
           <button
             onClick={() => setConversationOpen(!conversationOpen)}
             style={{
@@ -675,11 +728,11 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             }}
           >
             <span>{conversationOpen ? '▾' : '▸'}</span>
-            <span>Conversation ({session.conversation.length} messages)</span>
+            <span>Conversation ({conversation.length} messages)</span>
           </button>
         )}
 
-        {conversationOpen && session.conversation.length > 0 && (
+        {conversationOpen && conversation.length > 0 && (
           <div style={{
             flex: 1,
             overflow: 'auto',
@@ -688,7 +741,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             flexDirection: 'column',
             gap: '8px',
           }}>
-            {session.conversation.map((msg, i) => (
+            {conversation.map((msg, i) => (
               <div key={i} style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -706,6 +759,24 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                   color: 'var(--text)',
                 }}>
                   {msg.content}
+                  {/* Show changed pages in timeline */}
+                  {msg.changed_pages && msg.changed_pages.length > 0 && (
+                    <div style={{ marginTop: '4px', fontSize: '11px', color: 'var(--text-dim)' }}>
+                      {msg.changed_pages.map((p, j) => (
+                        <button
+                          key={p}
+                          onClick={() => setActivePage(p)}
+                          style={{
+                            background: 'none', border: 'none', cursor: 'pointer',
+                            color: 'var(--accent)', fontSize: '11px', padding: 0,
+                            textDecoration: 'underline',
+                          }}
+                        >
+                          {p}
+                        </button>
+                      )).reduce<React.ReactNode[]>((acc, el, j) => j === 0 ? [el] : [...acc, ', ', el], [])}
+                    </div>
+                  )}
                 </div>
 
                 {/* Render structured questions */}

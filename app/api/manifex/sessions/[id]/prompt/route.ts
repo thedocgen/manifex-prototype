@@ -12,36 +12,17 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const prompt: string = (body.prompt || '').trim();
   if (!prompt) return NextResponse.json({ error: 'prompt required' }, { status: 400 });
 
-  // Build conversation context for multi-turn flows
-  // Include recent messages so the LLM can see Q&A exchanges
-  const recentConversation = session.conversation.slice(-6); // last 3 exchanges max
+  // Client passes recent conversation for multi-turn context
+  const conversationContext: ConversationMessage[] = body.conversationContext || [];
 
   const response = await editManifest(session.manifest_state, prompt, {
-    conversationContext: recentConversation.length > 0 ? recentConversation : undefined,
+    conversationContext: conversationContext.length > 0 ? conversationContext : undefined,
   });
 
-  // Add user message to conversation
-  const userMsg: ConversationMessage = {
-    role: 'user',
-    content: prompt,
-    timestamp: new Date().toISOString(),
-  };
-
   if (response.type === 'question') {
-    // LLM asked a question — add both messages to conversation, no doc changes
-    const assistantMsg: ConversationMessage = {
-      role: 'assistant',
-      content: response.result.message,
-      questions: response.result.questions,
-      timestamp: new Date().toISOString(),
-    };
-
-    const updated = await updateSession(id, {
-      conversation: [...session.conversation, userMsg, assistantMsg],
-    });
-
+    // LLM asked a question — no doc changes, return question for the UI
     return NextResponse.json({
-      session: updated,
+      session,
       response_type: 'question',
       message: response.result.message,
       questions: response.result.questions,
@@ -51,14 +32,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // LLM updated docs — create pending attempt
   const proposed = makeManifestState(response.result.pages, response.result.tree);
 
-  const assistantMsg: ConversationMessage = {
-    role: 'assistant',
-    content: response.result.diff_summary,
-    timestamp: new Date().toISOString(),
-  };
-
   const updated = await updateSession(id, {
-    conversation: [...session.conversation, userMsg, assistantMsg],
     pending_attempt: {
       prompt,
       proposed_manifest: proposed,
@@ -71,5 +45,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   return NextResponse.json({
     session: updated,
     response_type: 'update',
+    diff_summary: response.result.diff_summary,
   });
 }
