@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback, use } from 'react';
 import { useRouter } from 'next/navigation';
 import { Markdown, countMatches } from '@/components/Markdown';
-import type { ManifexSession, ManifestState, TreeNode } from '@/lib/types';
+import type { ManifexSession, ManifestState, TreeNode, ConversationMessage, Question } from '@/lib/types';
 
 type StatusKind = 'idle' | 'thinking' | 'compiling' | 'saving' | 'success' | 'error';
 
@@ -94,6 +94,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [pageSearch, setPageSearch] = useState('');
   const [pageSearchOpen, setPageSearchOpen] = useState(false);
   const [activeMatchIdx, setActiveMatchIdx] = useState(0);
+  const [conversationOpen, setConversationOpen] = useState(false);
 
   const load = async () => {
     const res = await fetch(`/api/manifex/sessions/${id}`);
@@ -138,10 +139,16 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
 
   const renderInBackground = async () => {
     try {
+      // Notify breakout panes that compilation is starting
+      try { new BroadcastChannel('manifex-preview').postMessage({ type: 'compiling' }); } catch {}
       const res = await fetch(`/api/manifex/sessions/${id}/render`, { method: 'POST' });
       if (!res.ok) return;
       const data = await res.json();
-      if (data.inlined_html) setPreviewHtml(data.inlined_html);
+      if (data.inlined_html) {
+        setPreviewHtml(data.inlined_html);
+        // Broadcast update to breakout panes
+        try { new BroadcastChannel('manifex-preview').postMessage({ type: 'update', html: data.inlined_html }); } catch {}
+      }
     } catch { /* silent */ }
   };
 
@@ -182,7 +189,22 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     if (!prompt.trim()) return;
     const p = prompt;
     setPrompt('');
-    await action('/prompt', { prompt: p }, { statusKind: 'thinking', statusMsg: 'Thinking…' });
+    setConversationOpen(true); // Show conversation when user sends a message
+    const data = await action('/prompt', { prompt: p }, { statusKind: 'thinking', statusMsg: 'Thinking…' });
+    // If the LLM asked a question, keep conversation open (already open)
+    // If it was an update, conversation stays open to show the exchange
+  };
+
+  const submitSecretAnswer = async (questionId: string, key: string, value: string) => {
+    if (!session) return;
+    // Store secret via separate endpoint
+    await fetch('/api/manifex/secrets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: session.project_id, key, value }),
+    });
+    // Then send a follow-up prompt telling the LLM the secret was stored
+    setPrompt(`I've provided the ${key}. It's stored securely — continue with the setup.`);
   };
 
   if (!session) {
@@ -543,7 +565,31 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                 data-testid="breakout-btn"
                 onClick={() => {
                   const w = window.open('', '_blank');
-                  if (w) { w.document.open(); w.document.write(previewHtml); w.document.close(); }
+                  if (w) {
+                    // Write initial HTML + BroadcastChannel listener for live updates
+                    const listenerScript = `<script>
+                      const ch = new BroadcastChannel('manifex-preview');
+                      ch.onmessage = e => {
+                        if (e.data.type === 'update' && e.data.html) {
+                          document.open();
+                          document.write(e.data.html);
+                          document.close();
+                        }
+                        if (e.data.type === 'compiling') {
+                          if (!document.getElementById('mx-compile-overlay')) {
+                            const d = document.createElement('div');
+                            d.id = 'mx-compile-overlay';
+                            d.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,0.9);display:flex;align-items:center;justify-content:center;z-index:9999;font-family:system-ui;color:#374151;font-size:14px';
+                            d.textContent = 'Building your app…';
+                            document.body.appendChild(d);
+                          }
+                        }
+                      };
+                    </script>`;
+                    w.document.open();
+                    w.document.write(previewHtml + listenerScript);
+                    w.document.close();
+                  }
                 }}
                 style={{
                   background: 'transparent',
@@ -602,13 +648,159 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         </div>
       )}
 
-      {/* Bottom prompt bar */}
+      {/* Conversation + prompt area */}
       <footer className="build-footer" style={{
         borderTop: '1px solid var(--border)',
         background: 'var(--bg-elev)',
-        padding: '12px 24px',
+        display: 'flex',
+        flexDirection: 'column',
+        maxHeight: conversationOpen ? '40vh' : 'auto',
       }}>
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+        {/* Conversation toggle + thread */}
+        {session.conversation.length > 0 && (
+          <button
+            onClick={() => setConversationOpen(!conversationOpen)}
+            style={{
+              background: 'none',
+              border: 'none',
+              borderBottom: conversationOpen ? '1px solid var(--border)' : 'none',
+              padding: '6px 24px',
+              fontSize: '11px',
+              color: 'var(--text-dim)',
+              cursor: 'pointer',
+              textAlign: 'left',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+          >
+            <span>{conversationOpen ? '▾' : '▸'}</span>
+            <span>Conversation ({session.conversation.length} messages)</span>
+          </button>
+        )}
+
+        {conversationOpen && session.conversation.length > 0 && (
+          <div style={{
+            flex: 1,
+            overflow: 'auto',
+            padding: '12px 24px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+          }}>
+            {session.conversation.map((msg, i) => (
+              <div key={i} style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                gap: '4px',
+              }}>
+                <div style={{
+                  background: msg.role === 'user' ? 'var(--accent-soft)' : 'rgba(0,0,0,0.03)',
+                  border: msg.role === 'user' ? '1px solid rgba(217,119,6,0.2)' : '1px solid var(--border)',
+                  borderRadius: '12px',
+                  padding: '8px 14px',
+                  maxWidth: '80%',
+                  fontSize: '13px',
+                  lineHeight: 1.5,
+                  color: 'var(--text)',
+                }}>
+                  {msg.content}
+                </div>
+
+                {/* Render structured questions */}
+                {msg.questions && msg.questions.length > 0 && (
+                  <div style={{
+                    background: 'rgba(0,0,0,0.03)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '12px',
+                    padding: '10px 14px',
+                    maxWidth: '80%',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                  }}>
+                    {msg.questions.map(q => (
+                      <div key={q.id}>
+                        <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text)', marginBottom: '4px' }}>
+                          {q.text}
+                        </div>
+                        {q.type === 'choice' && q.options && (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                            {q.options.map(opt => (
+                              <button
+                                key={opt}
+                                onClick={() => {
+                                  setPrompt(opt);
+                                  // Auto-submit the choice
+                                  setTimeout(() => {
+                                    const btn = document.querySelector('[data-testid="submit-prompt-btn"]') as HTMLButtonElement;
+                                    if (btn && !btn.disabled) btn.click();
+                                  }, 50);
+                                }}
+                                disabled={busy}
+                                style={{
+                                  background: 'var(--bg-elev)',
+                                  border: '1px solid var(--border)',
+                                  borderRadius: '8px',
+                                  padding: '6px 12px',
+                                  fontSize: '12px',
+                                  color: 'var(--text)',
+                                  cursor: 'pointer',
+                                  textAlign: 'left',
+                                }}
+                              >
+                                {opt}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        {q.type === 'text' && (
+                          <input
+                            placeholder="Type your answer…"
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                setPrompt((e.target as HTMLInputElement).value);
+                                (e.target as HTMLInputElement).value = '';
+                              }
+                            }}
+                            style={{ width: '100%', padding: '6px 10px', fontSize: '12px', borderRadius: '6px' }}
+                          />
+                        )}
+                        {q.type === 'secret' && (
+                          <div style={{ display: 'flex', gap: '6px' }}>
+                            <input
+                              type="password"
+                              placeholder="Paste securely…"
+                              data-secret-key={q.id}
+                              style={{ flex: 1, padding: '6px 10px', fontSize: '12px', borderRadius: '6px' }}
+                            />
+                            <button
+                              onClick={() => {
+                                const input = document.querySelector(`[data-secret-key="${q.id}"]`) as HTMLInputElement;
+                                if (input?.value) {
+                                  submitSecretAnswer(q.id, q.id, input.value);
+                                  input.value = '';
+                                }
+                              }}
+                              className="mx-btn mx-btn-primary"
+                              style={{ padding: '4px 10px', fontSize: '11px' }}
+                            >
+                              Save
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Prompt input */}
+        <div style={{ padding: '12px 24px', display: 'flex', gap: '10px', alignItems: 'center' }}>
           <div style={{ display: 'flex', gap: '4px' }}>
             <button data-testid="undo-btn" onClick={() => action('/undo', undefined, { statusMsg: 'Undoing…', autoRender: true })} disabled={busy || session.history.length === 0} className="mx-btn mx-btn-ghost" title="Undo" style={{ padding: '6px 8px', fontSize: '13px' }}>↶</button>
             <button data-testid="redo-btn" onClick={() => action('/redo', undefined, { statusMsg: 'Redoing…', autoRender: true })} disabled={busy || session.redo_stack.length === 0} className="mx-btn mx-btn-ghost" title="Redo" style={{ padding: '6px 8px', fontSize: '13px' }}>↷</button>
