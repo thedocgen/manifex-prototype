@@ -277,6 +277,15 @@ input:focus, textarea:focus {
   40% { transform: translateY(-4px); opacity: 1; }
 }
 
+/* ─── Preview reveal ─────────────────────────── */
+.mx-preview-reveal {
+  animation: slideInRight 0.4s ease;
+}
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
 /* Search highlighting */
 .mx-search-match {
   background: rgba(59, 130, 246, 0.12);

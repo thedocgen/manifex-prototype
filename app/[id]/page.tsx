@@ -493,8 +493,14 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       {/* Main content: [Sidebar + Docs | Preview] */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
-        {/* Left pane: Sidebar + Doc content (50%) */}
-        <div style={{ flex: '0 0 50%', display: 'flex', overflow: 'hidden', borderRight: '1px solid var(--border)' }}>
+        {/* Left pane: Sidebar + Doc content (full-width until first render, then 50%) */}
+        <div style={{
+          flex: previewHtml ? '0 0 50%' : '1 1 100%',
+          display: 'flex',
+          overflow: 'hidden',
+          borderRight: previewHtml ? '1px solid var(--border)' : 'none',
+          transition: 'flex 0.4s ease',
+        }}>
 
           {/* Sidebar nav */}
           {sidebarOpen && (
@@ -753,8 +759,9 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           </div>
         </div>
 
-        {/* Right pane: App preview (50%) */}
-        <div data-testid="preview-pane" style={{
+        {/* Right pane: App preview (hidden until first render, then slides in) */}
+        {(previewHtml || compiling) && (
+        <div data-testid="preview-pane" className="mx-preview-reveal" style={{
           flex: '0 0 50%',
           display: 'flex',
           flexDirection: 'column',
@@ -858,8 +865,8 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                           onClick={() => setPrompt(ex)}
                           style={{
                             background: 'var(--accent-soft)',
-                            border: '1px solid rgba(217,119,6,0.12)',
-                            borderRadius: '10px',
+                            border: '1px solid rgba(59,130,246,0.12)',
+                            borderRadius: '6px',
                             padding: '10px 16px',
                             fontSize: '13px',
                             color: 'var(--accent)',
@@ -877,7 +884,30 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             )}
           </div>
         </div>
+        )}
       </div>
+
+      {/* Build button — prominent when no preview yet */}
+      {!previewHtml && !compiling && Object.keys(currentState.pages).length > 1 && (
+        <div style={{
+          borderTop: '1px solid var(--border)',
+          background: 'var(--bg-elev)',
+          padding: '16px 24px',
+          textAlign: 'center',
+        }}>
+          <button
+            onClick={renderInBackground}
+            disabled={busy}
+            className="mx-btn mx-btn-primary"
+            style={{ padding: '12px 32px', fontSize: '15px' }}
+          >
+            Build your app
+          </button>
+          <p style={{ fontSize: '12px', color: 'var(--text-dim)', margin: '8px 0 0' }}>
+            Review the documentation above, then build when ready.
+          </p>
+        </div>
+      )}
 
       {/* Suggested change bar */}
       {pending && (
