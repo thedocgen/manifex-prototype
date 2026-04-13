@@ -301,8 +301,8 @@ export async function editManifest(
     max_tokens: 16000,
     temperature: options.variation ? 0.9 : 0,
     system: EDIT_SYSTEM,
-    tools: [UPDATE_DOCS_TOOL],
-    tool_choice: { type: 'tool', name: 'update_docs' },
+    tools: [UPDATE_DOCS_TOOL, ASK_USER_TOOL],
+    tool_choice: { type: 'any' },
     messages: [{ role: 'user', content: messageContent }],
   });
 
