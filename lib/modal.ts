@@ -497,13 +497,16 @@ export async function compileManifestToCodex(
 
   const resp = await client().messages.create({
     model: MODEL,
-    max_tokens: 16000,
+    // Headroom for index.html + styles.css + app.js + optional tests.js.
+    // Hit truncation at 16000 once tests_js was added — the LLM was producing
+    // tests but running out of budget before completing app.js.
+    max_tokens: 32000,
     temperature: 0,
     system: systemPrompt,
     tools: [
       {
         name: 'emit_codex',
-        description: 'Emit the compiled codex as three files.',
+        description: 'Emit the compiled codex as three or four files.',
         input_schema: {
           type: 'object' as const,
           properties: {
@@ -526,11 +529,15 @@ export async function compileManifestToCodex(
   if (!toolUse || toolUse.type !== 'tool_use') throw new Error('LLM did not call emit_codex');
 
   const input = toolUse.input as { index_html?: string; styles_css?: string; app_js?: string; tests_js?: string };
-  if (!input.index_html || !input.styles_css || !input.app_js) {
-    throw new Error(`Compiler missing keys: ${Object.keys(input).join(', ')}`);
+  const missing: string[] = [];
+  if (!input.index_html) missing.push('index_html');
+  if (!input.styles_css) missing.push('styles_css');
+  if (!input.app_js) missing.push('app_js');
+  if (missing.length > 0) {
+    throw new Error(`Compiler missing keys: ${missing.join(', ')} (present: ${Object.keys(input).join(', ') || 'none'}; stop_reason: ${resp.stop_reason})`);
   }
 
-  const files: CodexFiles = { 'index.html': input.index_html, 'styles.css': input.styles_css, 'app.js': input.app_js };
+  const files: CodexFiles = { 'index.html': input.index_html!, 'styles.css': input.styles_css!, 'app.js': input.app_js! };
   if (input.tests_js) {
     files['tests.js'] = input.tests_js;
   }
