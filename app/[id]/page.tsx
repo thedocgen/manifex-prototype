@@ -520,21 +520,20 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     const recentContext = updatedConvo.slice(-6);
 
     setStatus('thinking');
-    // Progressive loading for first prompt (scaffolding takes 60-90s)
+    // One honest message per phase. The status text used to cycle on a
+    // timer ("Analyzing… / Planning… / Generating…") which had no real
+    // relationship to what the LLM was actually doing — a loading
+    // illusion. Now the skeleton preview carries the visible-progress
+    // load during compile, and this status bar just states the phase.
+    // Keep one fallback for the 90s+ case so users know it isn't stuck.
     const isFirstPrompt = conversation.length <= 1;
     const progressTimers: ReturnType<typeof setTimeout>[] = [];
     if (isFirstPrompt) {
-      setStatusMsg('Analyzing your idea…');
-      progressTimers.push(setTimeout(() => setStatusMsg('Planning documentation structure…'), 8000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Generating architecture diagrams…'), 25000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Writing specifications…'), 50000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Polishing the details…'), 80000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Almost ready — finalizing the documentation…'), 120000));
+      setStatusMsg('Scaffolding your documentation…');
+      progressTimers.push(setTimeout(() => setStatusMsg('Scaffolding your documentation… (this can take up to 2 minutes for the first build)'), 90000));
     } else {
-      setStatusMsg('Thinking about your change…');
-      progressTimers.push(setTimeout(() => setStatusMsg('Updating the relevant pages…'), 15000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Reviewing the changes…'), 45000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Almost ready — finalizing the edit…'), 80000));
+      setStatusMsg('Updating your docs…');
+      progressTimers.push(setTimeout(() => setStatusMsg('Updating your docs… (taking longer than usual — still working)'), 60000));
     }
     try {
       const res = await fetch(`/api/manifex/sessions/${id}/prompt`, {
@@ -1162,7 +1161,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
               <span style={{ fontWeight: 500, color: 'var(--text)' }}>
                 {currentState.pages['overview']?.title || 'Preview'}
               </span>
-              {compiling && <span style={{ color: 'var(--accent)' }}>Updating…</span>}
+              {compiling && <span style={{ color: 'var(--accent)' }}>Building your app…</span>}
             </span>
             <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
             {previewHtml && (
