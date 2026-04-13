@@ -3,6 +3,7 @@
 
 import Anthropic from '@anthropic-ai/sdk';
 import { sha256 } from './crypto';
+import { renderDiagramMarkers } from './diagram';
 import type { CodexFiles, CompiledCodex, ManifestState, DocPage, TreeNode, Question, ConversationMessage } from './types';
 import { serializePages } from './types';
 
@@ -149,7 +150,23 @@ When generating docs (after planning confirmation, or for follow-up prompts on a
 
 Additional domain-specific pages as needed (e.g. "User Accounts", "Notifications", "Search and Filters").
 
-ASCII DIAGRAM RULES (apply to every diagram on every page):
+RENDERED DIAGRAMS — prefer over hand-drawn ASCII when possible:
+For the "How It Works" architecture diagram (and any other flowchart on any page where the relationships are clean), emit a special marker that Manifex will render via MonodrawAPI:
+
+<!--DIAGRAM:{"boxes":[...],"lines":[...]}-->
+
+Spec format:
+- boxes: array of { id, text, col, row, w, h }. col/row are character positions starting at 0. w/h are box dimensions in characters. Rectangles render with a 1-character border so a w=12 box holds 10 chars of text.
+- lines: array of { from, from_attach, to, to_attach }. from/to are box ids. attach values are "top" | "bottom" | "left" | "right".
+- Lay out boxes horizontally (col offsets 18 apart for w=14 boxes) for a left-to-right flow, vertically (row offsets 6 apart for h=3 boxes) for top-down. Leave 4-char gutters between boxes.
+- The marker MUST be on its own line. Manifex post-processes the marker after generation, replacing it with the rendered ASCII art wrapped in a fenced code block.
+
+Example for a 3-tier flow (UI → API → Database):
+<!--DIAGRAM:{"boxes":[{"id":"ui","text":"UI Layer","col":0,"row":0,"w":14,"h":3},{"id":"api","text":"API","col":20,"row":0,"w":10,"h":3},{"id":"db","text":"Database","col":34,"row":0,"w":14,"h":3}],"lines":[{"from":"ui","from_attach":"right","to":"api","to_attach":"left"},{"from":"api","from_attach":"right","to":"db","to_attach":"left"}]}-->
+
+Use rendered diagrams ONLY when the relationships are simple boxes-and-arrows. For complex layouts (data model entity diagrams with field lists, decision trees with many branches), fall back to the hand-drawn ASCII rules below.
+
+ASCII DIAGRAM RULES (apply to every hand-drawn diagram on every page):
 - Every diagram MUST be wrapped in a fenced \`\`\`text or \`\`\` code block so the markdown renderer treats it as preformatted text. Otherwise the alignment collapses.
 - Use box-drawing characters (┌ ┐ └ ┘ │ ─ ├ ┤ ┬ ┴ ┼) consistently within a single diagram. Don't mix box characters with ASCII pipes (|) and dashes (-) in the same drawing.
 - Arrows: use ──> ──► ◄── for horizontal flow, │ ▼ ▲ for vertical. Keep arrowheads on a single line.
@@ -385,7 +402,7 @@ export async function editManifest(
     const pages: { [path: string]: DocPage } = {};
     for (const [path, page] of Object.entries(input.pages)) {
       if (page && typeof page.title === 'string' && typeof page.content === 'string') {
-        pages[path] = { title: page.title, content: page.content };
+        pages[path] = { title: page.title, content: await renderDiagramMarkers(page.content) };
       }
     }
     if (Object.keys(pages).length === 0) throw new Error('LLM returned empty pages');
@@ -497,10 +514,10 @@ export async function compileManifestToCodex(
 
   const resp = await client().messages.create({
     model: MODEL,
-    // Headroom for index.html + styles.css + app.js + optional tests.js.
-    // Hit truncation at 16000 once tests_js was added — the LLM was producing
-    // tests but running out of budget before completing app.js.
-    max_tokens: 32000,
+    // 21000 stays under the SDK's non-streaming budget cap (above that,
+    // the TS SDK refuses the request and demands streaming). Keeps
+    // headroom for index.html + styles.css + app.js + optional tests.js.
+    max_tokens: 21000,
     temperature: 0,
     system: systemPrompt,
     tools: [
