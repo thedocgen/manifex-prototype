@@ -185,6 +185,34 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   // select; text/secret inputs are controlled by this same map.
   const [activeAnswers, setActiveAnswers] = useState<Record<string, string>>({});
 
+  // Derive a friendly project title for the docs panel + browser tab.
+  // Order of preference:
+  //   1. The Overview page's H1 once the LLM has scaffolded real content
+  //      (anything other than the starter "# New Project").
+  //   2. A short slice of the first user prompt, when planning is still
+  //      in progress.
+  //   3. "Planning…" if there's a conversation but no usable text yet.
+  //   4. "New Project" as a final fallback (matches starter content).
+  const projectTitle = (() => {
+    const overview = session?.manifest_state?.pages?.['overview']?.content || '';
+    const h1 = overview.match(/^#\s+(.+?)\s*$/m)?.[1]?.trim();
+    if (h1 && h1 !== 'New Project') return h1;
+    const firstUser = conversation.find(m => m.role === 'user')?.content?.trim();
+    if (firstUser) {
+      const cleaned = firstUser.replace(/\s+/g, ' ').slice(0, 50);
+      return cleaned.length < firstUser.length ? cleaned + '…' : cleaned;
+    }
+    if (conversation.length > 0) return 'Planning…';
+    return 'New Project';
+  })();
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    document.title = projectTitle === 'New Project'
+      ? 'Manifex — Spec-driven development for visionaries'
+      : `${projectTitle} · Manifex`;
+  }, [projectTitle]);
+
   // Track whether conversation was loaded from server (skip persisting on restore)
   const convoLoadedRef = useRef(false);
   const convoSkipNextPersist = useRef(false);
@@ -852,8 +880,29 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                 >
                   {sidebarOpen ? '◀' : '▶'}
                 </button>
-                <span style={{ fontWeight: 500, color: 'var(--text)' }}>
-                  {displayPages[effectiveActivePage]?.title || effectiveActivePage}
+                <span style={{ display: 'flex', alignItems: 'baseline', gap: '6px', minWidth: 0 }}>
+                  {projectTitle && projectTitle !== 'New Project' && (
+                    <>
+                      <span
+                        style={{
+                          fontSize: '12px',
+                          color: 'var(--text-dim)',
+                          fontWeight: 400,
+                          maxWidth: '260px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                        title={projectTitle}
+                      >
+                        {projectTitle}
+                      </span>
+                      <span style={{ color: 'var(--text-dim)' }}>›</span>
+                    </>
+                  )}
+                  <span style={{ fontWeight: 500, color: 'var(--text)' }}>
+                    {displayPages[effectiveActivePage]?.title || effectiveActivePage}
+                  </span>
                 </span>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
