@@ -7,10 +7,25 @@ import type { CodexFiles } from './types';
  * Robust to multiple <link> and <script> tag formats — replaces ANY <link> referencing
  * styles.css and ANY <script> referencing app.js, regardless of attribute order or quoting.
  */
+const TEST_RUNNER_SCRIPT = `
+(function(){
+  window.__manifexRunTests = function(){
+    var tests = window.__manifexTests || [];
+    var results = [];
+    for (var i = 0; i < tests.length; i++) {
+      var t = tests[i];
+      try { t.fn(); results.push({ name: t.name, passed: true }); }
+      catch (e) { results.push({ name: t.name, passed: false, error: (e && e.message) || String(e) }); }
+    }
+    return { total: results.length, passed: results.filter(function(r){return r.passed;}).length, results: results };
+  };
+})();`;
+
 export function inlineCodex(files: CodexFiles): string {
   let html = files['index.html'];
   const css = files['styles.css'];
   const js = files['app.js'];
+  const tests = files['tests.js'];
 
   // Replace any <link ... href="styles.css" ...> (or .href='styles.css') with inline <style>
   html = html.replace(
@@ -37,6 +52,16 @@ export function inlineCodex(files: CodexFiles): string {
     html = html.replace(/<\/body>/i, `<script>${js}</script></body>`);
     if (!html.includes(`<script>${js}`)) {
       html = html + `<script>${js}</script>`;
+    }
+  }
+
+  // Inject tests.js + runner harness if tests were generated.
+  if (tests) {
+    const testsBlock = `<script data-manifex-tests>${tests}\n${TEST_RUNNER_SCRIPT}</script>`;
+    if (html.includes('</body>')) {
+      html = html.replace('</body>', `${testsBlock}</body>`);
+    } else {
+      html = html + testsBlock;
     }
   }
 

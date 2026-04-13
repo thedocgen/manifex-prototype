@@ -451,7 +451,7 @@ CODE RULES:
 - app.js: clean, well-organized JavaScript
 - Be deterministic: identical input should produce equivalent output
 - Annotate major HTML elements with data-doc-page and data-doc-section attributes mapping to the documentation page describing them. Use lowercase hyphenated slugs.
-- If a Tests documentation page exists, also generate tests_js: executable test functions that validate the compiled app matches the docs. Each test function checks DOM elements, content, and styles. Use a simple assert pattern: function assert(condition, message) { ... }${secretsSection}`;
+- If a Tests documentation page exists, also generate tests_js: executable tests that validate the compiled app matches the docs. Format MUST be: declare window.__manifexTests as an array of { name: string, fn: () => void } objects. Each fn throws on failure. Provide a top-level helper "function assert(c, m) { if (!c) throw new Error(m); }" then push tests like: window.__manifexTests = [{ name: 'home button visible', fn: () => assert(document.querySelector('[data-doc-page=overview]'), 'overview missing') }, ...]. Tests should cover key DOM structure, content text, and visual presence claims from the Tests page. Do NOT use top-level await or DOM-not-ready code — assume document is fully loaded when tests run.${secretsSection}`;
 }
 
 export async function compileManifestToCodex(
