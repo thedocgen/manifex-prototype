@@ -228,6 +228,17 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [editCard, setEditCard] = useState<{ x: number; y: number; page: string; section: string; elementText: string; elementTag: string } | null>(null);
   const [editCardText, setEditCardText] = useState('');
   const [presencePeers, setPresencePeers] = useState<{ user_id: string; display_name: string | null; page_path: string | null }[]>([]);
+  // Phase 2B chunk 5: streaming build log panel. buildLog is the
+  // accumulating text from the devbox agent's /__logs SSE stream during
+  // a compile + provision. provisionStage is the high-level stage name
+  // returned in the /render response (files / setup / run / wait_port /
+  // done) so users see "apt-get installing…" style progress without us
+  // parsing the raw log tail.
+  const [buildLog, setBuildLog] = useState<string>('');
+  const [buildLogOpen, setBuildLogOpen] = useState<boolean>(false);
+  const [provisionStage, setProvisionStage] = useState<string | null>(null);
+  const buildLogSseRef = useRef<EventSource | null>(null);
+  const buildLogRef = useRef<HTMLDivElement>(null);
   // Per-question answers for the active planning question group. Keyed by
   // questionId. Cleared after a successful combined-submit. Choice clicks
   // select; text/secret inputs are controlled by this same map.
@@ -490,9 +501,57 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
 
   const showToast = (kind: 'success' | 'error', msg: string) => setToast({ kind, msg });
 
+  // Open an SSE subscription to the devbox's /__logs endpoint so the
+  // build log panel live-tails apt / npm / next-dev output while
+  // provisionDevboxProject runs on the server. Safe to call multiple
+  // times — previous subscription is torn down first.
+  const openBuildLogStream = useCallback((devboxUrl: string) => {
+    try { buildLogSseRef.current?.close(); } catch {}
+    buildLogSseRef.current = null;
+    if (!devboxUrl) return;
+    try {
+      const es = new EventSource(`${devboxUrl.replace(/\/+$/, '')}/__logs`);
+      es.onmessage = (ev) => {
+        try {
+          const parsed = JSON.parse(ev.data);
+          const chunk = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+          setBuildLog(prev => {
+            const next = prev + chunk;
+            return next.length > 200_000 ? next.slice(-200_000) : next;
+          });
+        } catch {
+          // Non-JSON frames are ignored — the agent emits JSON strings per pushLog.
+        }
+      };
+      es.addEventListener('reset', () => setBuildLog(''));
+      es.onerror = () => {
+        // Swallow transient SSE errors; EventSource auto-reconnects.
+      };
+      buildLogSseRef.current = es;
+    } catch {} // SSE is best-effort
+  }, []);
+
+  const closeBuildLogStream = useCallback(() => {
+    try { buildLogSseRef.current?.close(); } catch {}
+    buildLogSseRef.current = null;
+  }, []);
+
+  // Clean up the SSE subscription on unmount so it doesn't leak when
+  // navigating between sessions.
+  useEffect(() => () => { closeBuildLogStream(); }, [closeBuildLogStream]);
+
+  // Auto-scroll the log panel to the bottom as new lines stream in.
+  useEffect(() => {
+    const el = buildLogRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [buildLog]);
+
   const renderInBackground = async () => {
     setCompiling(true);
     setPreviewError(null);
+    setBuildLog('');
+    setProvisionStage(null);
+    setBuildLogOpen(true);
 
     // Phase 2A: ensure a Fly devbox exists for this session BEFORE the
     // compile fires. Idempotent on the server. The render route's
@@ -505,7 +564,15 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       const dbRes = await fetch(`/api/manifex/sessions/${id}/devbox`, { method: 'POST' });
       if (dbRes.ok) {
         const dbData = await dbRes.json();
-        if (dbData?.session) setSession(dbData.session);
+        if (dbData?.session) {
+          setSession(dbData.session);
+          // Phase 2B: as soon as we know the devbox URL, subscribe to its
+          // /__logs stream so the build-log panel is live-tailing apt
+          // + npm + next output by the time the /render POST starts
+          // streaming work through /__exec.
+          const devboxUrl = (dbData.session?.manifest_state as any)?.devbox?.url;
+          if (devboxUrl) openBuildLogStream(devboxUrl);
+        }
       } else if (dbRes.status === 503) {
         const dbErr = await dbRes.json().catch(() => ({}));
         setPreviewError(dbErr?.error || 'Too many devboxes are running. Stop one before opening another.');
@@ -530,18 +597,32 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'compiling' }); } catch {}
       const res = await fetch(`/api/manifex/sessions/${id}/render`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
+      // Reflect provision stage + any failure detail regardless of ok status.
+      if (data?.provision?.stage) setProvisionStage(data.provision.stage);
       if (!res.ok) {
-        setPreviewError(data?.error || 'Something went wrong building your app. Try making another change.');
+        const stage = data?.provision?.stage;
+        const stageDetail = data?.provision?.detail;
+        const base = data?.error || 'Something went wrong building your app. Try making another change.';
+        setPreviewError(stage ? `${base} (${stage}${stageDetail ? ': ' + stageDetail : ''})` : base);
+        // Keep the log panel open on failure so the user can read the
+        // last lines that explain why setup.sh or the dev server failed.
         return;
       }
       if (data.inlined_html) {
         setPreviewHtml(data.inlined_html);
         try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'update', html: data.inlined_html }); } catch {}
       }
+      // On a successful build, collapse the log panel after a short delay
+      // so the user's attention returns to the working preview. Leaves
+      // the log content in state in case they reopen the panel.
+      if (data?.devbox_provisioned) {
+        setTimeout(() => setBuildLogOpen(false), 2500);
+      }
     } catch {
       setPreviewError('Couldn\'t connect to the build service. Try again in a moment.');
     } finally {
       setCompiling(false);
+      closeBuildLogStream();
     }
   };
 
@@ -1515,6 +1596,100 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           <div style={{ flex: 1, background: '#fff', position: 'relative' }}>
             {compiling && (
               <div className="mx-compile-bar" />
+            )}
+            {buildLogOpen && (buildLog || compiling) && (
+              <div
+                data-testid="build-log-panel"
+                style={{
+                  position: 'absolute',
+                  left: 12,
+                  right: 12,
+                  bottom: 12,
+                  maxHeight: '50%',
+                  minHeight: 120,
+                  background: 'rgba(15, 23, 42, 0.95)',
+                  color: '#e2e8f0',
+                  borderRadius: 8,
+                  boxShadow: '0 10px 30px rgba(15, 23, 42, 0.35)',
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                  fontSize: 11.5,
+                  lineHeight: 1.5,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  overflow: 'hidden',
+                  zIndex: 20,
+                }}
+              >
+                <div
+                  style={{
+                    padding: '6px 10px',
+                    borderBottom: '1px solid rgba(148, 163, 184, 0.25)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    color: '#cbd5e1',
+                    fontSize: 11,
+                  }}
+                >
+                  <span>
+                    {compiling ? 'Building your app…' : previewError ? 'Build failed' : 'Build complete'}
+                    {provisionStage && (
+                      <span style={{ marginLeft: 8, color: '#94a3b8' }}>
+                        stage:{' '}
+                        <span style={{ color: '#fbbf24' }}>{provisionStage}</span>
+                      </span>
+                    )}
+                  </span>
+                  <button
+                    onClick={() => setBuildLogOpen(false)}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#94a3b8',
+                      cursor: 'pointer',
+                      fontSize: 14,
+                      padding: '2px 6px',
+                    }}
+                    title="Hide build log"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div
+                  ref={buildLogRef}
+                  style={{
+                    flex: 1,
+                    overflowY: 'auto',
+                    padding: '8px 10px',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                  }}
+                >
+                  {buildLog || (compiling ? '(waiting for build output…)' : '')}
+                </div>
+              </div>
+            )}
+            {!buildLogOpen && buildLog && !compiling && (
+              <button
+                onClick={() => setBuildLogOpen(true)}
+                style={{
+                  position: 'absolute',
+                  left: 12,
+                  bottom: 12,
+                  background: 'rgba(15, 23, 42, 0.8)',
+                  color: '#e2e8f0',
+                  border: 'none',
+                  borderRadius: 6,
+                  padding: '4px 10px',
+                  fontSize: 11,
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                  cursor: 'pointer',
+                  zIndex: 20,
+                }}
+                title="Show build log"
+              >
+                Build log
+              </button>
             )}
             {previewError ? (
               <div style={{ padding: '40px 24px', textAlign: 'center', color: '#6b7280' }}>
