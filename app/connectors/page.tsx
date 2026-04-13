@@ -1,6 +1,8 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Brand } from '@/components/Brand';
+
+const STORAGE_KEY = 'manifex.connectors.v1';
 
 interface Connector {
   id: string;
@@ -35,16 +37,43 @@ const BUILTIN_CONNECTORS: Connector[] = [
   },
 ];
 
+function mergeWithBuiltins(stored: Connector[]): Connector[] {
+  const storedIds = new Set(stored.map(c => c.id));
+  const missingBuiltins = BUILTIN_CONNECTORS.filter(b => !storedIds.has(b.id));
+  return [...missingBuiltins, ...stored];
+}
+
 export default function ConnectorsPage() {
   const [connectors, setConnectors] = useState<Connector[]>(BUILTIN_CONNECTORS);
+  const [hydrated, setHydrated] = useState(false);
   const [newName, setNewName] = useState('');
   const [newEndpoint, setNewEndpoint] = useState('');
   const [newApiKey, setNewApiKey] = useState('');
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Connector[];
+        if (Array.isArray(parsed)) setConnectors(mergeWithBuiltins(parsed));
+      }
+    } catch {}
+    setHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(connectors)); } catch {}
+  }, [connectors, hydrated]);
 
   const toggleConnector = (id: string) => {
     setConnectors(prev =>
       prev.map(c => (c.id === id ? { ...c, enabled: !c.enabled } : c))
     );
+  };
+
+  const removeConnector = (id: string) => {
+    setConnectors(prev => prev.filter(c => c.id !== id));
   };
 
   const addCustomConnector = () => {
@@ -142,6 +171,20 @@ export default function ConnectorsPage() {
                     boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
                   }} />
                 </button>
+                {!c.builtin && (
+                  <button
+                    onClick={() => removeConnector(c.id)}
+                    title="Remove connector"
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: 'var(--text-dim)',
+                      fontSize: '16px',
+                      padding: '4px 6px',
+                    }}
+                  >×</button>
+                )}
               </div>
             </div>
           ))}
