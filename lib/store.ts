@@ -144,6 +144,16 @@ function rowToProject(row: any): ManifexProject {
 // Sessions
 // ────────────────────────────────────────────────────────────
 
+export async function listSessionsForProject(projectId: string): Promise<ManifexSession[]> {
+  const { data, error } = await client()
+    .from('manifex_sessions')
+    .select('*')
+    .eq('project_id', projectId)
+    .order('updated_at', { ascending: false });
+  if (error) throw new Error(`listSessionsForProject: ${error.message}`);
+  return (data || []).map(rowToSession);
+}
+
 export async function getSession(id: string): Promise<ManifexSession | null> {
   const { data, error } = await client()
     .from('manifex_sessions')

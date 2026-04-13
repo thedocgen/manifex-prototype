@@ -33,6 +33,36 @@ export default function HomePage() {
   useEffect(() => { load(); }, []);
 
   const openBuild = async (projectId: string) => {
+    // Prefer an EXISTING session with real content. Heuristic, ordered:
+    //   1. Sessions whose manifest has more than just the starter overview.
+    //   2. Within those, the most recently updated.
+    //   3. If no real-content sessions exist, the most recently updated of any.
+    //   4. If no sessions at all, create a new one.
+    // This recovers users who got stranded in empty sessions by the earlier
+    // POST-on-every-click bug, and prevents the same trap going forward.
+    try {
+      const listRes = await fetch(`/api/manifex/projects/${projectId}/sessions`);
+      if (listRes.ok) {
+        const listData = await listRes.json();
+        const sessions: any[] = listData?.sessions || [];
+        if (sessions.length > 0) {
+          const hasRealContent = (s: any) => {
+            const pages = s?.manifest_state?.pages || {};
+            const keys = Object.keys(pages);
+            if (keys.length > 1) return true;
+            // Single-page session is "real" if its overview content has been
+            // edited away from the starter boilerplate.
+            const overview = pages['overview']?.content || '';
+            return !!overview && !overview.includes('Describe your app idea below');
+          };
+          const real = sessions.filter(hasRealContent);
+          const pick = (real.length > 0 ? real : sessions)[0];
+          router.push(`/${pick.id}`);
+          return;
+        }
+      }
+    } catch {}
+    // Fallback: no sessions yet, create one.
     const res = await fetch(`/api/manifex/projects/${projectId}/sessions`, { method: 'POST' });
     const data = await res.json();
     if (data.session) router.push(`/${data.session.id}`);
