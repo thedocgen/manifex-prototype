@@ -5,6 +5,45 @@ import { Markdown, countMatches } from '@/components/Markdown';
 import type { ManifexSession, ManifestState, TreeNode, ConversationMessage, Question } from '@/lib/types';
 import { generateSkeletonHtml } from '@/lib/skeleton';
 
+// Tiny SSE reader. Splits the body stream on `\n\n`, parses each event
+// block into { event, data }, and dispatches to the right callback. We
+// only handle the three event names our /prompt route emits.
+async function consumePromptStream(
+  body: ReadableStream<Uint8Array>,
+  handlers: {
+    onDraft: (data: any) => void;
+    onComplete: (data: any) => void;
+    onError: (data: any) => void;
+  },
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) >= 0) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      let eventName = 'message';
+      const dataLines: string[] = [];
+      for (const line of block.split('\n')) {
+        if (line.startsWith('event: ')) eventName = line.slice(7).trim();
+        else if (line.startsWith('data: ')) dataLines.push(line.slice(6));
+      }
+      if (dataLines.length === 0) continue;
+      let parsed: any;
+      try { parsed = JSON.parse(dataLines.join('\n')); }
+      catch { continue; }
+      if (eventName === 'draft') handlers.onDraft(parsed);
+      else if (eventName === 'complete') handlers.onComplete(parsed);
+      else if (eventName === 'error') handlers.onError(parsed);
+    }
+  }
+}
+
 type StatusKind = 'idle' | 'thinking' | 'compiling' | 'saving' | 'success' | 'error';
 
 // ── Preview Bridge Script (injected into compiled HTML) ──
@@ -546,17 +585,95 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       setStatusMsg('Updating your docs…');
       progressTimers.push(setTimeout(() => setStatusMsg('Updating your docs… (taking longer than usual — still working)'), 60000));
     }
+    // Image uploads can't use SSE (server takes the legacy non-streaming
+    // path for image/pdf payloads). Everything else opts into SSE so the
+    // two-pass shallow→deep scaffold can stream a draft event in 15-30s.
+    const hasImage = !!(pendingFile && (pendingFile.type === 'image' || pendingFile.type === 'pdf') && pendingFile.base64);
+    const requestHeaders: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (!hasImage) requestHeaders['Accept'] = 'text/event-stream';
+
     try {
       const res = await fetch(`/api/manifex/sessions/${id}/prompt`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: requestHeaders,
         body: JSON.stringify({
           prompt: p,
           conversationContext: recentContext,
           expected_sha: session?.manifest_state?.sha,
-          ...(pendingFile && (pendingFile.type === 'image' || pendingFile.type === 'pdf') && pendingFile.base64 ? { image: { base64: pendingFile.base64, media_type: pendingFile.mediaType } } : {}),
+          ...(hasImage ? { image: { base64: pendingFile!.base64, media_type: pendingFile!.mediaType } } : {}),
         }),
       });
+
+      // SSE branch: parse event stream, handle draft + complete + error.
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('text/event-stream') && res.body) {
+        await consumePromptStream(res.body, {
+          onDraft: (data) => {
+            // Stop the progress timers; the draft is on screen now.
+            progressTimers.forEach(clearTimeout);
+            progressTimers.length = 0;
+            setStatusMsg('Refining content…');
+            if (data.session) {
+              setSession(data.session);
+              const pa = data.session.pending_attempt;
+              if (pa?.changed_pages?.length > 0) setActivePage(pa.changed_pages[0]);
+            }
+            const serverConv: ConversationMessage[] | null = Array.isArray(data.session?.manifest_state?.conversation)
+              ? data.session.manifest_state.conversation
+              : null;
+            if (serverConv) {
+              convoSkipNextPersist.current = true;
+              setConversation(serverConv);
+            }
+            setConversationOpen(true);
+          },
+          onComplete: (data) => {
+            progressTimers.forEach(clearTimeout);
+            progressTimers.length = 0;
+            setStatus('idle');
+            setStatusMsg('');
+            const serverConv: ConversationMessage[] | null = Array.isArray(data.session?.manifest_state?.conversation)
+              ? data.session.manifest_state.conversation
+              : null;
+            if (data.response_type === 'question') {
+              if (serverConv) {
+                convoSkipNextPersist.current = true;
+                setConversation(serverConv);
+              }
+              if (data.session) setSession(data.session);
+              setConversationOpen(true);
+              return;
+            }
+            if (data.session) {
+              setSession(data.session);
+              const pa = data.session.pending_attempt;
+              if (pa?.changed_pages?.length > 0) setActivePage(pa.changed_pages[0]);
+            }
+            if (serverConv) {
+              convoSkipNextPersist.current = true;
+              setConversation(serverConv);
+            }
+          },
+          onError: (data) => {
+            progressTimers.forEach(clearTimeout);
+            progressTimers.length = 0;
+            setStatus('idle');
+            setStatusMsg('');
+            const errMsg: ConversationMessage = {
+              role: 'assistant',
+              content: data.error || 'Something went wrong while thinking about your request.',
+              timestamp: new Date().toISOString(),
+            };
+            setConversation(prev => [...prev, errMsg]);
+            showToast('error', data.error || 'Request failed');
+          },
+        });
+        return;
+      }
+
+      // Non-SSE / legacy branch: parse JSON as before.
       const data = await res.json();
       // Stop the progressive status timers as soon as we have a response —
       // otherwise a delayed 'Still working…' tick can fire after the UI has
@@ -1421,19 +1538,54 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       {pending && (
         <div className="build-suggested-bar" style={{
           borderTop: '1px solid var(--border)',
-          background: 'var(--bg-elev)',
+          background: pending.draft ? 'rgba(59, 130, 246, 0.06)' : 'var(--bg-elev)',
           padding: '10px 24px',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
+          gap: '12px',
         }}>
-          <span style={{ fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-            {pending.diff_summary || 'Changes suggested'}
+          <span style={{ display: 'flex', alignItems: 'center', gap: '10px', fontSize: '13px', color: 'var(--text-muted)', fontStyle: 'italic', minWidth: 0 }}>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {pending.diff_summary || 'Changes suggested'}
+            </span>
+            {pending.draft && (
+              <span
+                data-testid="draft-pill"
+                title="The structure is ready. Manifex is filling in the full content — Looks good will be enabled when it's done."
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                  padding: '2px 9px',
+                  borderRadius: '999px',
+                  background: 'rgba(59, 130, 246, 0.14)',
+                  color: '#1e40af',
+                  fontSize: '10px',
+                  fontStyle: 'normal',
+                  fontWeight: 600,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.04em',
+                  flexShrink: 0,
+                }}
+              >
+                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#3b82f6', animation: 'pulse-add 1.5s ease infinite' }} />
+                Refining content…
+              </span>
+            )}
           </span>
           <div style={{ display: 'flex', gap: '8px' }}>
-            <button data-testid="keep-btn" onClick={() => action('/keep', undefined, { successMsg: 'Applied!', autoRender: true })} disabled={busy} className="mx-btn mx-btn-success">Looks good</button>
-            <button data-testid="retry-btn" onClick={() => action('/retry', undefined, { statusMsg: 'Thinking…' })} disabled={busy} className="mx-btn mx-btn-secondary">Try again</button>
-            <button data-testid="forget-btn" onClick={() => action('/forget')} disabled={busy} className="mx-btn mx-btn-danger">Never mind</button>
+            <button
+              data-testid="keep-btn"
+              onClick={() => action('/keep', undefined, { successMsg: 'Applied!', autoRender: true })}
+              disabled={busy || !!pending.draft}
+              title={pending.draft ? 'Wait for the refinement pass to finish before building' : undefined}
+              className="mx-btn mx-btn-success"
+            >
+              Looks good
+            </button>
+            <button data-testid="retry-btn" onClick={() => action('/retry', undefined, { statusMsg: 'Thinking…' })} disabled={busy || !!pending.draft} className="mx-btn mx-btn-secondary">Try again</button>
+            <button data-testid="forget-btn" onClick={() => action('/forget')} disabled={busy || !!pending.draft} className="mx-btn mx-btn-danger">Never mind</button>
           </div>
         </div>
       )}

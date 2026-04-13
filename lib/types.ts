@@ -26,6 +26,13 @@ export interface PendingAttempt {
   diff_summary?: string;
   changed_pages?: string[]; // paths of pages that were modified/created/deleted
   attempt_number: number;
+  /**
+   * Two-pass scaffold marker. true while the deep refinement pass is still
+   * running in the background — the proposed_manifest contains shallow page
+   * summaries. false (or absent) once the deep pass has updated the
+   * proposed_manifest with full content.
+   */
+  draft?: boolean;
 }
 
 export interface ManifexProject {

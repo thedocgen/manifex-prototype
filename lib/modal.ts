@@ -269,6 +269,40 @@ const UPDATE_DOCS_TOOL = {
   },
 };
 
+const SHALLOW_DOCS_TOOL = {
+  name: 'emit_shallow_docs',
+  description: 'Emit a STRUCTURE-ONLY draft of the documentation: the page tree plus a 1-paragraph summary per page. No full sections, no diagrams, no detailed lists. The deep refinement pass will fill in content separately.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      pages: {
+        type: 'object' as const,
+        description: 'Complete map of page path to { title, content }. Each content is a markdown stub: just the H1 title plus a single short paragraph (2-4 sentences) describing what the full version will cover.',
+        additionalProperties: {
+          type: 'object' as const,
+          properties: {
+            title: { type: 'string' as const, description: 'Page title' },
+            content: { type: 'string' as const, description: 'Stub markdown: H1 + one short paragraph. Keep it under 300 characters.' },
+          },
+          required: ['title' as const, 'content' as const],
+        },
+      },
+      tree: {
+        type: 'array' as const,
+        description: 'Sidebar navigation tree',
+        items: TREE_NODE_SCHEMA,
+      },
+      diff_summary: { type: 'string' as const, description: 'Brief user-friendly summary of what the full doc set will contain' },
+      changed_pages: {
+        type: 'array' as const,
+        description: 'Paths of pages in this draft',
+        items: { type: 'string' as const },
+      },
+    },
+    required: ['pages' as const, 'tree' as const, 'diff_summary' as const, 'changed_pages' as const],
+  },
+};
+
 const ASK_USER_TOOL = {
   name: 'ask_user',
   description: 'Ask clarifying questions when genuinely uncertain. Use sparingly — most prompts should just work.',
@@ -324,6 +358,90 @@ export type EditResponse =
   | { type: 'update'; result: EditResult }
   | { type: 'question'; result: AskResult };
 
+/**
+ * Fast first-pass scaffold. Emits the page tree + 1-paragraph summary per
+ * page only — no full content, no diagrams, no detailed lists. Used by the
+ * /prompt route's two-pass scaffold flow to give the user something to look
+ * at in 15-30s while the deep refinement runs in the background.
+ *
+ * Always returns `{type: 'update', result: ...}` — the shallow path doesn't
+ * support clarifying questions. Callers should run the planning question
+ * branch via the regular editManifest first if they need to.
+ */
+export async function editManifestShallow(
+  currentState: ManifestState,
+  prompt: string,
+  options: {
+    conversationContext?: ConversationMessage[];
+  } = {}
+): Promise<EditResponse> {
+  const serialized = serializePages(currentState);
+
+  let userText = `CURRENT DOCUMENTATION PAGES:\n\n${serialized}\n\n---\n\n`;
+  if (options.conversationContext && options.conversationContext.length > 0) {
+    userText += 'RECENT CONVERSATION:\n';
+    for (const msg of options.conversationContext) {
+      userText += `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}\n`;
+    }
+    userText += '\n---\n\n';
+  }
+  userText += `USER REQUEST: ${prompt}\n\n---\n\nEmit a STRUCTURE-ONLY draft via emit_shallow_docs. Each page's content must be just the H1 title plus a short paragraph (2-4 sentences). Do NOT generate full sections, diagrams, or detailed lists — the deep pass will fill those in. Keep each page content under 300 characters.`;
+
+  const resp = await client().messages.create({
+    model: MODEL,
+    max_tokens: 4000,
+    temperature: 0,
+    system: EDIT_SYSTEM,
+    tools: [SHALLOW_DOCS_TOOL],
+    tool_choice: { type: 'tool', name: 'emit_shallow_docs' },
+    messages: [{ role: 'user', content: userText }],
+  });
+
+  const toolUse = resp.content.find(b => b.type === 'tool_use');
+  if (!toolUse || toolUse.type !== 'tool_use') {
+    throw new Error(`editManifestShallow: LLM did not call emit_shallow_docs (stop_reason: ${resp.stop_reason})`);
+  }
+
+  const input = toolUse.input as {
+    pages?: { [path: string]: { title?: string; content?: string } };
+    tree?: any[];
+    diff_summary?: string;
+    changed_pages?: string[];
+  };
+  if (!input.pages || !input.tree) {
+    throw new Error(`editManifestShallow: emit_shallow_docs missing pages or tree`);
+  }
+
+  const pages: { [path: string]: DocPage } = {};
+  for (const [path, page] of Object.entries(input.pages)) {
+    if (page && typeof page.title === 'string' && typeof page.content === 'string') {
+      pages[path] = { title: page.title, content: page.content };
+    }
+  }
+
+  function validateTree(nodes: any[]): TreeNode[] {
+    return nodes
+      .filter((n: any) => n && typeof n.path === 'string' && typeof n.title === 'string')
+      .map((n: any) => {
+        const node: TreeNode = { path: n.path, title: n.title };
+        if (n.children && Array.isArray(n.children) && n.children.length > 0) {
+          node.children = validateTree(n.children);
+        }
+        return node;
+      });
+  }
+
+  return {
+    type: 'update',
+    result: {
+      pages,
+      tree: validateTree(input.tree),
+      diff_summary: input.diff_summary || `Drafting: ${prompt.slice(0, 60)}`,
+      changed_pages: Array.isArray(input.changed_pages) ? input.changed_pages : Object.keys(pages),
+    },
+  };
+}
+
 export async function editManifest(
   currentState: ManifestState,
   prompt: string,
@@ -332,6 +450,13 @@ export async function editManifest(
     conversationContext?: ConversationMessage[];
     image?: { base64: string; media_type: string };
     forceUpdate?: boolean;
+    /**
+     * When set, the deep pass treats this as a refinement of an existing
+     * shallow draft instead of a fresh generation. The shallow tree is
+     * preserved; each page is deepened with full content. Prevents the
+     * shallow→deep pair from disagreeing on page paths or section names.
+     */
+    shallowDraft?: { pages: { [path: string]: DocPage }; tree: TreeNode[] };
   } = {}
 ): Promise<EditResponse> {
   const serialized = serializePages(currentState);
@@ -347,6 +472,16 @@ export async function editManifest(
   }
 
   userText += `USER REQUEST: ${prompt || '(see attached image)'}`;
+
+  // If a shallow draft exists, instruct the deep pass to refine it in place
+  // rather than re-generating the structure. Keeps the same tree and page
+  // paths so the user's mental model from the draft survives the upgrade.
+  if (options.shallowDraft) {
+    const draftSerialized = Object.entries(options.shallowDraft.pages)
+      .map(([path, page]) => `=== ${path} (${page.title}) ===\n${page.content}`)
+      .join('\n\n');
+    userText += `\n\n---\n\nSHALLOW DRAFT (already shown to the user — DEEPEN this in place, do not regenerate the structure):\n\n${draftSerialized}\n\nDEEP PASS RULES:\n- Use the EXACT same tree and page paths from the draft above.\n- Each page keeps its title and identity; replace the short summary with the full thorough content per the documentation rules in the system prompt.\n- changed_pages must list every page from the shallow draft (you are deepening all of them).\n- Do NOT add new pages or remove existing pages from the draft. Do NOT rename page paths.`;
+  }
 
   // Build message content — multimodal if image or PDF provided
   const messageContent: any[] = [];
