@@ -16,16 +16,17 @@ window.addEventListener('message', function(e) {
     document.body.style.cursor = __visualEditMode ? 'crosshair' : '';
   }
 });
-// Click handler: walk up DOM to find data-doc-page.
-// In normal mode → emit doc-navigate (sidebar follows).
-// In visual edit mode → emit visual-edit with click coords + section info,
-//   parent overlays a floating card near the click.
+// Click handler is OPT-IN via visual edit mode. When the mode is OFF
+// (the default), clicks pass through to the compiled app normally so
+// users can actually interact with their built UI (press buttons, fill
+// forms, etc). When the mode is ON, clicks walk up the DOM to find
+// data-doc-page and emit a visual-edit message with click coords +
+// section info; the parent renders a floating edit card near the click.
 document.addEventListener('click', function(e) {
+  if (!__visualEditMode) return;
   var el = e.target;
   while (el && el !== document.body) {
     if (el.dataset && el.dataset.docPage) {
-      var rect = el.getBoundingClientRect();
-      var iframeRect = { x: 0, y: 0 }; // placeholder, parent re-projects against its own frame
       var payload = {
         page: el.dataset.docPage,
         section: el.dataset.docSection || '',
@@ -34,17 +35,10 @@ document.addEventListener('click', function(e) {
         elementText: (el.textContent || '').slice(0, 80).trim(),
         elementTag: el.tagName.toLowerCase(),
       };
-      if (__visualEditMode) {
-        window.parent.postMessage(Object.assign({ type: 'visual-edit' }, payload), '*');
-        el.style.outline = '2px dashed rgba(217, 119, 6, 0.85)';
-        el.style.outlineOffset = '2px';
-        setTimeout(function() { el.style.outline = ''; el.style.outlineOffset = ''; }, 1500);
-      } else {
-        window.parent.postMessage({ type: 'doc-navigate', page: payload.page, section: payload.section }, '*');
-        el.style.outline = '2px solid rgba(59, 130, 246, 0.6)';
-        el.style.outlineOffset = '2px';
-        setTimeout(function() { el.style.outline = ''; el.style.outlineOffset = ''; }, 800);
-      }
+      window.parent.postMessage(Object.assign({ type: 'visual-edit' }, payload), '*');
+      el.style.outline = '2px dashed rgba(217, 119, 6, 0.85)';
+      el.style.outlineOffset = '2px';
+      setTimeout(function() { el.style.outline = ''; el.style.outlineOffset = ''; }, 1500);
       e.preventDefault();
       e.stopPropagation();
       return;
