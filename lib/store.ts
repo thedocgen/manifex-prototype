@@ -154,7 +154,13 @@ export async function listSessionsForProject(projectId: string): Promise<Manifex
   return (data || []).map(rowToSession);
 }
 
+// Postgres uuid lookup throws on bad shape ("invalid input syntax for type uuid").
+// Reject obviously-malformed ids before they reach Supabase so route handlers
+// can return 404 instead of bubbling a 500.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function getSession(id: string): Promise<ManifexSession | null> {
+  if (!UUID_RE.test(id)) return null;
   const { data, error } = await client()
     .from('manifex_sessions')
     .select('*')

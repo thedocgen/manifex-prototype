@@ -13,7 +13,7 @@ import { serializePages } from './types';
 // cache. Re-exported so route handlers can import this constant instead
 // of hard-coding it (we drifted to three different versions before
 // extracting this).
-export const COMPILER_VERSION = 'manifex-claude-sonnet-4-v5-contract-first';
+export const COMPILER_VERSION = 'manifex-claude-sonnet-4-v6-budget-headroom';
 const MODEL = 'claude-sonnet-4-5-20250929';
 
 let _client: Anthropic | null = null;
@@ -823,27 +823,43 @@ async function emitOneFile(
   const userContent = extraUserContext
     ? `${extraUserContext}\n\nThe contract above is ABSOLUTE for the file you're about to emit. Even if the documentation below describes behavior for elements not in the contract, you may NOT use selectors outside the contract. If a doc-described feature has no contract attribute, skip it — the user will iterate.\n\nDOCUMENTATION PAGES (read for context, but the contract overrides):\n\n${serialized}\n\nEmit the ${label} file now by calling emit_file. Every selector you write MUST appear in the contract above.`
     : `DOCUMENTATION PAGES:\n\n${serialized}\n\nEmit the ${label} file now by calling emit_file.`;
-  const resp = await client().messages.create({
-    model: MODEL,
-    max_tokens: maxTokens,
-    temperature: 0,
-    system: sharedSystem + '\n' + roleSystem,
-    tools: [EMIT_FILE_TOOL],
-    tool_choice: { type: 'tool', name: 'emit_file' },
-    messages: [
-      { role: 'user', content: userContent },
-    ],
-  });
 
-  const toolUse = resp.content.find(b => b.type === 'tool_use');
-  if (!toolUse || toolUse.type !== 'tool_use') {
-    throw new Error(`[${label}] LLM did not call emit_file (stop_reason: ${resp.stop_reason})`);
+  // Try once at the requested budget. If the LLM hits max_tokens before
+  // it finishes writing the content string, the tool input arrives with
+  // an empty/missing content field. Retry once with a substantially
+  // larger budget — the per-file budgets used to be tight to optimize
+  // speed but were causing recurring 500s on verbose files.
+  const SDK_MAX_NON_STREAMING = 21000;
+  const attempt = async (budget: number): Promise<{ content?: string; stopReason: string | null }> => {
+    const resp = await client().messages.create({
+      model: MODEL,
+      max_tokens: budget,
+      temperature: 0,
+      system: sharedSystem + '\n' + roleSystem,
+      tools: [EMIT_FILE_TOOL],
+      tool_choice: { type: 'tool', name: 'emit_file' },
+      messages: [{ role: 'user', content: userContent }],
+    });
+    const toolUse = resp.content.find(b => b.type === 'tool_use');
+    if (!toolUse || toolUse.type !== 'tool_use') {
+      throw new Error(`[${label}] LLM did not call emit_file (stop_reason: ${resp.stop_reason})`);
+    }
+    const input = toolUse.input as { content?: string };
+    return { content: input.content, stopReason: resp.stop_reason };
+  };
+
+  let r = await attempt(maxTokens);
+  if (r.stopReason === 'max_tokens' || typeof r.content !== 'string' || r.content.length === 0) {
+    const retryBudget = Math.min(SDK_MAX_NON_STREAMING, Math.max(maxTokens, 8000) + 8000);
+    if (retryBudget > maxTokens) {
+      console.warn(`[${label}] hit max_tokens at ${maxTokens}, retrying at ${retryBudget}`);
+      r = await attempt(retryBudget);
+    }
   }
-  const input = toolUse.input as { content?: string };
-  if (typeof input.content !== 'string' || input.content.length === 0) {
-    throw new Error(`[${label}] emit_file returned empty content (stop_reason: ${resp.stop_reason})`);
+  if (typeof r.content !== 'string' || r.content.length === 0) {
+    throw new Error(`[${label}] emit_file returned empty content after retry (stop_reason: ${r.stopReason})`);
   }
-  return input.content;
+  return r.content;
 }
 
 // Scan the emitted HTML for data-action / data-role / data-field values
@@ -901,13 +917,13 @@ export async function compileManifestToCodex(
   const started = Date.now();
 
   const [htmlContent, cssContent] = await Promise.all([
-    emitOneFile('index.html', sharedSystem, HTML_ROLE, serialized, 12000),
-    emitOneFile('styles.css', sharedSystem, CSS_ROLE, serialized, 4000),
+    emitOneFile('index.html', sharedSystem, HTML_ROLE, serialized, 16000),
+    emitOneFile('styles.css', sharedSystem, CSS_ROLE, serialized, 6000),
   ]);
   const phase1Ms = Date.now() - started;
 
   const contract = extractElementContract(htmlContent);
-  const jsContent = await emitOneFile('app.js', sharedSystem, JS_ROLE, serialized, 12000, contract);
+  const jsContent = await emitOneFile('app.js', sharedSystem, JS_ROLE, serialized, 18000, contract);
   const phase2Ms = Date.now() - started - phase1Ms;
 
   const files: CodexFiles = {
@@ -927,7 +943,7 @@ export async function compileManifestToCodex(
     (async () => {
       try {
         const testsStarted = Date.now();
-        const testsContent = await emitOneFile('tests.js', sharedSystem, TESTS_ROLE, serialized, 14000, contract);
+        const testsContent = await emitOneFile('tests.js', sharedSystem, TESTS_ROLE, serialized, 18000, contract);
         const testsMs = Date.now() - testsStarted;
         console.log(`[compile] background tests.js finished in ${testsMs}ms (${testsContent.length} bytes)`);
         // Update the cache entry with the full file set including tests.
