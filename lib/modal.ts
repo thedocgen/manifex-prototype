@@ -4,6 +4,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { sha256 } from './crypto';
 import { renderDiagramMarkers } from './diagram';
+import { buildConnectorsBlock } from './connectors';
 import type { CodexFiles, CompiledCodex, ManifestState, DocPage, TreeNode, Question, ConversationMessage } from './types';
 import { serializePages } from './types';
 
@@ -373,6 +374,7 @@ export async function editManifestShallow(
   prompt: string,
   options: {
     conversationContext?: ConversationMessage[];
+    enabledConnectors?: string[];
   } = {}
 ): Promise<EditResponse> {
   const serialized = serializePages(currentState);
@@ -384,6 +386,10 @@ export async function editManifestShallow(
       userText += `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}\n`;
     }
     userText += '\n---\n\n';
+  }
+  const connectorsBlock = buildConnectorsBlock(options.enabledConnectors);
+  if (connectorsBlock) {
+    userText += `${connectorsBlock}\n\n---\n\n`;
   }
   userText += `USER REQUEST: ${prompt}\n\n---\n\nEmit a STRUCTURE-ONLY draft via emit_shallow_docs. Each page's content must be just the H1 title plus a short paragraph (2-4 sentences). Do NOT generate full sections, diagrams, or detailed lists — the deep pass will fill those in. Keep each page content under 300 characters.`;
 
@@ -457,6 +463,7 @@ export async function editManifest(
      * shallow→deep pair from disagreeing on page paths or section names.
      */
     shallowDraft?: { pages: { [path: string]: DocPage }; tree: TreeNode[] };
+    enabledConnectors?: string[];
   } = {}
 ): Promise<EditResponse> {
   const serialized = serializePages(currentState);
@@ -471,6 +478,10 @@ export async function editManifest(
     userText += '\n---\n\n';
   }
 
+  const connectorsBlock = buildConnectorsBlock(options.enabledConnectors);
+  if (connectorsBlock) {
+    userText += `${connectorsBlock}\n\n---\n\n`;
+  }
   userText += `USER REQUEST: ${prompt || '(see attached image)'}`;
 
   // If a shallow draft exists, instruct the deep pass to refine it in place

@@ -52,6 +52,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   }
 
   const conversationContext: ConversationMessage[] = body.conversationContext || [];
+  const enabledConnectors: string[] = Array.isArray(body.connectors)
+    ? body.connectors.filter((c: any) => typeof c === 'string')
+    : [];
   const acceptHeader = req.headers.get('accept') || '';
   const wantsSse = acceptHeader.includes('text/event-stream');
   const existingConversation: ConversationMessage[] = Array.isArray(session.manifest_state?.conversation)
@@ -81,6 +84,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           try {
             shallow = await editManifestShallow(session.manifest_state, prompt, {
               conversationContext: conversationContext.length > 0 ? conversationContext : undefined,
+              enabledConnectors: enabledConnectors.length > 0 ? enabledConnectors : undefined,
             });
           } catch (e: any) {
             // The shallow tool sometimes refuses for first-prompt clarification —
@@ -143,6 +147,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
             deep = await editManifest(session.manifest_state, prompt, {
               conversationContext: conversationContext.length > 0 ? conversationContext : undefined,
               shallowDraft,
+              enabledConnectors: enabledConnectors.length > 0 ? enabledConnectors : undefined,
             });
           } catch (e: any) {
             const cls = classifyError(e);
@@ -246,6 +251,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     response = await editManifest(session.manifest_state, prompt, {
       conversationContext: conversationContext.length > 0 ? conversationContext : undefined,
       image,
+      enabledConnectors: enabledConnectors.length > 0 ? enabledConnectors : undefined,
     });
   } catch (e: any) {
     const cls = classifyError(e);

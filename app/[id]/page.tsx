@@ -594,6 +594,20 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     };
     if (!hasImage) requestHeaders['Accept'] = 'text/event-stream';
 
+    // Pull enabled connectors from localStorage (same key the connectors
+    // page writes). Sent on every /prompt call so the LLM doc spec can
+    // include features that use them.
+    let enabledConnectors: string[] = [];
+    try {
+      const raw = typeof window !== 'undefined' ? window.localStorage.getItem('manifex.connectors.v1') : null;
+      if (raw) {
+        const parsed = JSON.parse(raw) as { id: string; enabled?: boolean }[];
+        if (Array.isArray(parsed)) {
+          enabledConnectors = parsed.filter(c => c?.enabled).map(c => c.id);
+        }
+      }
+    } catch {}
+
     try {
       const res = await fetch(`/api/manifex/sessions/${id}/prompt`, {
         method: 'POST',
@@ -602,6 +616,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           prompt: p,
           conversationContext: recentContext,
           expected_sha: session?.manifest_state?.sha,
+          connectors: enabledConnectors,
           ...(hasImage ? { image: { base64: pendingFile!.base64, media_type: pendingFile!.mediaType } } : {}),
         }),
       });
