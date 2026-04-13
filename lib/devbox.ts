@@ -13,13 +13,13 @@
 const FLY_API_BASE = 'https://api.machines.dev/v1';
 const FLY_ORG = 'personal';
 const FLY_REGION = 'iad';
-// Phase 2B Path A: v2.1-ubuntu adds CORS on every agent endpoint so the
-// manifex-wip editor can orchestrate provisioning from the browser (POST
-// /__files, /__exec, SSE /__logs and /__events) without holding a Node
-// request open on the editor box for the full 3-5 min cold provision.
-// v2-ubuntu remains in the registry as the intermediate rollback target,
-// :latest is still v1 HTML-blob.
-const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v2.1-ubuntu';
+// Phase 2B pivot: v3-claude-agent is the Claude-on-the-devbox image.
+// Manifex no longer compiles projects itself — each devbox runs Claude
+// Code CLI in bypass-permissions mode and builds / edits /app/workspace
+// from the doc bundle. v2.1-ubuntu remains in the registry as the
+// previous-gen rollback target, v2-ubuntu one step before that, and
+// :latest is still the original v1 HTML-blob for the ultimate rollback.
+const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v3-claude-agent';
 const APP_PREFIX = 'manifex-app-';
 const MAX_ACTIVE_DEVBOXES = 3;
 
@@ -203,13 +203,25 @@ async function ensureWorkspaceVolume(appName: string): Promise<string> {
  * new machine's id.
  */
 async function createMachine(appName: string, volumeId: string): Promise<string> {
+  // Phase 2B pivot: the v3 agent spawns Claude Code CLI for every build,
+  // which needs credentials. We pass the editor's ANTHROPIC_API_KEY
+  // straight through to the devbox machine env at spawn time. This is
+  // fine for v1 — devboxes are ephemeral and per-session — but we'll
+  // want per-user BYOK eventually.
+  const anthropicKey = process.env.ANTHROPIC_API_KEY || '';
+  if (!anthropicKey) {
+    console.warn('[devbox] ANTHROPIC_API_KEY missing from manifex-wip env — Claude on the devbox will 401.');
+  }
   const body = {
     name: 'devbox',
     region: FLY_REGION,
     config: {
       image: DEVBOX_IMAGE,
       auto_destroy: false,
-      env: { PORT: '8080' },
+      env: {
+        PORT: '8080',
+        ANTHROPIC_API_KEY: anthropicKey,
+      },
       mounts: [
         {
           volume: volumeId,

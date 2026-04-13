@@ -608,125 +608,91 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     if (el) el.scrollTop = el.scrollHeight;
   }, [buildLog]);
 
-  // Phase 2B Path A browser-driven provisioning. The server's /render
-  // route now returns { files, skip_setup, devbox_url, build_log_url,
-  // ... } immediately after compile; the client orchestrates the slow
-  // provisioning work against the devbox agent directly so the server
-  // Fly Machine can idle without dropping a long-running HTTP request.
+  // Phase 2B pivot — Claude-on-the-devbox orchestration. The server's
+  // /build route concatenates the doc bundle into spec_md, the client
+  // POSTs it straight to the devbox's /__run endpoint, and Claude Code
+  // (running with --dangerously-skip-permissions inside the devbox)
+  // reads the spec + current workspace and builds / edits the project
+  // like a developer would. No compile pass on Manifex's side.
   //
-  // Steps the client drives:
-  //   1. POST /api/manifex/sessions/<id>/devbox  (idempotent, returns
-  //      session with attached devbox)
-  //   2. Open EventSource(devbox.url + /__logs) so the build log panel
-  //      starts live-tailing before setup.sh begins.
-  //   3. POST /api/manifex/sessions/<id>/render  (server compiles,
-  //      returns files + setup flag + devbox URLs).
-  //   4. POST <devbox>/__files with files (stage+swap workspace).
-  //   5. Unless skip_setup: POST <devbox>/__exec bash setup.sh, wait
-  //      for synchronous response. On 0 exit, POST /provisioned to
-  //      persist last_provisioned_sha so the next render can skip.
-  //   6. POST <devbox>/__exec bash run.sh with detach:true.
-  //   7. Poll <devbox>/__health every 1.5s until dev_running=true and
-  //      a probe GET / returns a non-stub response.
-  //   8. Force an iframe reload to the devbox URL.
-  //
-  // Errors at any stage flip previewError and keep the log panel open
-  // so the user can read the failure detail inline.
-  const provisionDevboxFromClient = async (
+  // Stages surfaced to the panel header:
+  //   compile → 'build' (GET spec_md + devbox URLs from /build)
+  //   claude  → Claude is actively running on the devbox
+  //   wait_port → Claude has exited, we're probing for the dev server
+  //   done    → iframe reloads
+  const runClaudeOnDevbox = async (
+    runUrl: string,
+    specMd: string,
+    goal: string,
     devboxUrl: string,
-    files: Record<string, string>,
-    skipSetup: boolean,
-    manifestSha: string,
-  ): Promise<{ ok: boolean; stage: string; detail?: string }> => {
-    const base = devboxUrl.replace(/\/+$/, '');
-
-    setProvisionStage('files');
+  ): Promise<{ ok: boolean; stage: string; detail?: string; git_sha?: string }> => {
+    setProvisionStage('claude');
+    let runResult: { ok?: boolean; exit_code?: number; duration_ms?: number; git_sha?: string } | null = null;
     try {
-      const filesRes = await fetch(`${base}/__files`, {
+      const runRes = await fetch(runUrl, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(files),
+        body: JSON.stringify({ spec_md: specMd, goal, permission_mode: 'bypassPermissions' }),
       });
-      if (!filesRes.ok) {
-        return { ok: false, stage: 'files', detail: `__files ${filesRes.status}` };
-      }
-    } catch (e: any) {
-      return { ok: false, stage: 'files', detail: e?.message || String(e) };
-    }
-
-    if (!skipSetup) {
-      setProvisionStage('setup');
-      try {
-        const setupRes = await fetch(`${base}/__exec`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ cmd: 'bash setup.sh', cwd: '/app/workspace' }),
-        });
-        if (!setupRes.ok) {
-          return { ok: false, stage: 'setup', detail: `__exec setup ${setupRes.status}` };
-        }
-        const setupData = await setupRes.json().catch(() => ({}));
-        if (!setupData?.ok || setupData?.exit_code !== 0) {
-          return {
-            ok: false,
-            stage: 'setup',
-            detail: `setup.sh exited ${setupData?.exit_code ?? '?'}`,
-          };
-        }
-        // Persist last_provisioned_sha so the next render can skip.
-        try {
-          await fetch(`/api/manifex/sessions/${id}/provisioned`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sha: manifestSha }),
-          });
-        } catch {} // non-fatal — worst case next build re-runs setup
-      } catch (e: any) {
-        return { ok: false, stage: 'setup', detail: e?.message || String(e) };
-      }
-    }
-
-    setProvisionStage('run');
-    try {
-      const runRes = await fetch(`${base}/__exec`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ cmd: 'bash run.sh', cwd: '/app/workspace', detach: true }),
-      });
+      // Claude runs for minutes; the agent responds when the CLI exits.
+      // The browser's default fetch timeout is long (browser-specific;
+      // typically 5-10 min without intervention). We don't wrap in
+      // AbortSignal.timeout — the log panel shows progress and the user
+      // can navigate away.
       if (!runRes.ok) {
-        return { ok: false, stage: 'run', detail: `__exec run ${runRes.status}` };
+        const text = await runRes.text().catch(() => '');
+        return { ok: false, stage: 'claude', detail: `__run ${runRes.status} ${text.slice(0, 200)}` };
       }
+      runResult = await runRes.json().catch(() => ({}));
     } catch (e: any) {
-      return { ok: false, stage: 'run', detail: e?.message || String(e) };
+      return { ok: false, stage: 'claude', detail: e?.message || String(e) };
     }
 
+    if (!runResult?.ok) {
+      return {
+        ok: false,
+        stage: 'claude',
+        detail: `claude exited ${runResult?.exit_code ?? '?'}`,
+        git_sha: runResult?.git_sha,
+      };
+    }
+
+    // Poll the agent's health + a probe on GET / until the dev server
+    // Claude started is actually serving something other than the
+    // "Building your app…" stub.
     setProvisionStage('wait_port');
+    const base = devboxUrl.replace(/\/+$/, '');
     const waitStarted = Date.now();
-    const MAX_WAIT_MS = 240_000;
+    const MAX_WAIT_MS = 180_000;
     const POLL_MS = 1500;
     while (Date.now() - waitStarted < MAX_WAIT_MS) {
       try {
         const h = await fetch(`${base}/__health`);
         if (h.ok) {
           const health = await h.json().catch(() => ({}));
-          if (health?.dev_running) {
-            // Probe the proxied root — agent returns a stub on ECONNREFUSED,
-            // so we only count a response that doesn't contain "Building
-            // your app…" as genuinely ready.
-            const probe = await fetch(`${base}/`, { cache: 'no-store' }).catch(() => null);
-            if (probe && probe.ok) {
-              const body = await probe.text().catch(() => '');
-              if (!body.includes('Building your app…')) {
-                setProvisionStage('done');
-                return { ok: true, stage: 'done' };
-              }
+          const probe = await fetch(`${base}/`, { cache: 'no-store' }).catch(() => null);
+          if (probe && probe.ok) {
+            const body = await probe.text().catch(() => '');
+            if (!body.includes('Building your app…')) {
+              setProvisionStage('done');
+              return { ok: true, stage: 'done', git_sha: runResult.git_sha };
             }
+          }
+          if (!health?.dev_port) {
+            // Claude never wrote .manifex-port. That's a soft failure —
+            // the box is healthy but the build didn't start a dev
+            // server. Bubble up a diagnostic.
           }
         }
       } catch {}
       await new Promise(r => setTimeout(r, POLL_MS));
     }
-    return { ok: false, stage: 'wait_port', detail: `dev server did not respond within ${Math.round(MAX_WAIT_MS / 1000)}s` };
+    return {
+      ok: false,
+      stage: 'wait_port',
+      detail: `dev server did not respond within ${Math.round(MAX_WAIT_MS / 1000)}s after Claude exited`,
+      git_sha: runResult.git_sha,
+    };
   };
 
   const renderInBackground = async () => {
@@ -778,24 +744,24 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     } catch {} // skeleton failures are non-fatal
     try {
       try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'compiling' }); } catch {}
-      setProvisionStage('compile');
-      const res = await fetch(`/api/manifex/sessions/${id}/render`, { method: 'POST' });
+      setProvisionStage('build');
+      const res = await fetch(`/api/manifex/sessions/${id}/build`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setPreviewError(data?.error || 'Something went wrong building your app. Try making another change.');
+        setPreviewError(data?.error || 'Something went wrong starting your build. Try making another change.');
         return;
       }
-      if (!data?.files || !data?.devbox_url) {
-        setPreviewError('Compile succeeded but no devbox was attached. Try reopening the session.');
+      if (!data?.spec_md || !data?.run_url || !data?.devbox_url) {
+        setPreviewError('Build endpoint returned an incomplete payload. Try reopening the session.');
         return;
       }
 
-      // Drive the provision pipeline directly against the devbox agent.
-      const result = await provisionDevboxFromClient(
-        data.devbox_url,
-        data.files as Record<string, string>,
-        Boolean(data.skip_setup),
-        String(data.manifest_sha),
+      // Hand the spec to Claude running on the devbox and let it build.
+      const result = await runClaudeOnDevbox(
+        data.run_url,
+        data.spec_md as string,
+        (data.goal as string) || '',
+        data.devbox_url as string,
       );
 
       if (!result.ok) {
