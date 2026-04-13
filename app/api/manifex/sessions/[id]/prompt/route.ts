@@ -141,18 +141,114 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
           // Pass 2 — deep refinement. If the shallow pass succeeded, deepen
           // the same tree; otherwise this is the first LLM call.
+          //
+          // Race against a hard timeout. The Anthropic SDK has its own
+          // timeouts but we've seen deep calls hang indefinitely. Without
+          // this race, an unresolved deep call leaves pending_attempt.
+          // draft=true forever and the user is stuck with a non-clickable
+          // 'Refining content…' pill.
+          const DEEP_TIMEOUT_MS = 6 * 60 * 1000; // 6 minutes
           const deepStarted = Date.now();
           let deep;
+          let deepFailure: { kind: string; userMessage: string; detail: string } | null = null;
           try {
-            deep = await editManifest(session.manifest_state, prompt, {
+            const deepPromise = editManifest(session.manifest_state, prompt, {
               conversationContext: conversationContext.length > 0 ? conversationContext : undefined,
               shallowDraft,
               enabledConnectors: enabledConnectors.length > 0 ? enabledConnectors : undefined,
             });
+            const timeoutPromise = new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error(`deep pass timed out after ${DEEP_TIMEOUT_MS}ms`)), DEEP_TIMEOUT_MS);
+            });
+            deep = await Promise.race([deepPromise, timeoutPromise]);
           } catch (e: any) {
             const cls = classifyError(e);
+            // Override the user-facing message for the bare-timeout case.
+            if (/deep pass timed out/i.test(cls.detail)) {
+              cls.kind = 'timeout';
+              cls.userMessage = 'The deep refinement is taking unusually long. The structure draft is still here — click Try again to retry, or Never mind to discard.';
+            }
             console.error('[prompt-sse] deep editManifest failed:', cls.kind, cls.detail);
-            send('error', { error: cls.userMessage, kind: cls.kind, detail: cls.detail });
+            deepFailure = { kind: cls.kind, userMessage: cls.userMessage, detail: cls.detail };
+          }
+
+          // Recovery path: deep pass failed. We MUST clear pending_attempt.
+          // draft so the UI unsticks. Three options for what to do with
+          // the existing shallow draft:
+          //   1. Drop pending_attempt entirely → user loses the draft.
+          //   2. Mark draft=false and keep the shallow content → user can
+          //      click Looks good but compiles a half-baked spec.
+          //   3. Mark draft=false but flag the proposed_manifest with an
+          //      'incomplete' marker so the UI shows a Try again CTA.
+          // Going with #2: it's the simplest unstick, and the assistant
+          // message we persist alongside it tells the user the deep pass
+          // failed and Try again is the right next action.
+          if (deepFailure) {
+            const nowIsoFail = new Date().toISOString();
+            const userMessage: ConversationMessage = {
+              role: 'user',
+              content: prompt,
+              answers: body.answers,
+              timestamp: nowIsoFail,
+            };
+            const errorAssistant: ConversationMessage = {
+              role: 'assistant',
+              content: deepFailure.userMessage,
+              timestamp: nowIsoFail,
+            };
+            // Replay the conversation: existing + user + (draft assistant if it ran) + error
+            const conversationWithError: ConversationMessage[] = [...existingConversation, userMessage];
+            if (shallowResult) {
+              conversationWithError.push({
+                role: 'assistant',
+                content: shallowResult.diff_summary || 'Drafting structure…',
+                diff_summary: shallowResult.diff_summary,
+                changed_pages: shallowResult.changed_pages,
+                timestamp: nowIsoFail,
+              });
+            }
+            conversationWithError.push(errorAssistant);
+
+            const recoveryManifest = {
+              ...session.manifest_state,
+              conversation: conversationWithError,
+            };
+
+            // Refetch to get the row's current pending_attempt (with the
+            // shallow draft populated by the earlier write) and set draft=false.
+            const refreshed = await getSession(id);
+            const existingPending = refreshed?.pending_attempt;
+            const recoveryPending = existingPending
+              ? { ...existingPending, draft: false }
+              : null;
+
+            try {
+              const recovered = await updateSession(id, {
+                manifest_state: recoveryManifest,
+                pending_attempt: recoveryPending,
+              });
+              send('error', {
+                error: deepFailure.userMessage,
+                kind: deepFailure.kind,
+                detail: deepFailure.detail,
+                session: recovered,
+              });
+            } catch (recoveryErr: any) {
+              console.error('[prompt-sse] recovery write failed:', recoveryErr?.message);
+              send('error', {
+                error: deepFailure.userMessage,
+                kind: deepFailure.kind,
+                detail: deepFailure.detail,
+              });
+            }
+            controller.close();
+            return;
+          }
+
+          if (!deep) {
+            // Defensive: should be unreachable since deepFailure handles all error paths.
+            console.error('[prompt-sse] deep result is undefined with no failure recorded');
+            send('error', { error: 'Internal error: deep pass produced no result', kind: 'unknown' });
             controller.close();
             return;
           }
@@ -227,6 +323,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           controller.close();
         } catch (outer: any) {
           console.error('[prompt-sse] stream crashed:', outer?.message);
+          // Last-resort recovery: clear any draft flag the inner code may
+          // have left set so the session doesn't lock the UI.
+          try {
+            const refreshed = await getSession(id);
+            if (refreshed?.pending_attempt?.draft) {
+              await updateSession(id, {
+                pending_attempt: { ...refreshed.pending_attempt, draft: false },
+              });
+            }
+          } catch (recErr: any) {
+            console.error('[prompt-sse] outer recovery write failed:', recErr?.message);
+          }
           try { controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: outer?.message || 'stream crashed' })}\n\n`)); } catch {}
           controller.close();
         }

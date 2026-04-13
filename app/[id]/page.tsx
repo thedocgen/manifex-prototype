@@ -676,12 +676,28 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             progressTimers.length = 0;
             setStatus('idle');
             setStatusMsg('');
-            const errMsg: ConversationMessage = {
-              role: 'assistant',
-              content: data.error || 'Something went wrong while thinking about your request.',
-              timestamp: new Date().toISOString(),
-            };
-            setConversation(prev => [...prev, errMsg]);
+            // The server's error event may include the recovered session
+            // (pending_attempt.draft cleared so the UI unsticks). Use it
+            // when present and skip the local conversation append because
+            // the server already persisted an explanatory assistant
+            // message in manifest_state.conversation.
+            if (data.session) {
+              setSession(data.session);
+              const serverConv: ConversationMessage[] | null = Array.isArray(data.session?.manifest_state?.conversation)
+                ? data.session.manifest_state.conversation
+                : null;
+              if (serverConv) {
+                convoSkipNextPersist.current = true;
+                setConversation(serverConv);
+              }
+            } else {
+              const errMsg: ConversationMessage = {
+                role: 'assistant',
+                content: data.error || 'Something went wrong while thinking about your request.',
+                timestamp: new Date().toISOString(),
+              };
+              setConversation(prev => [...prev, errMsg]);
+            }
             showToast('error', data.error || 'Request failed');
           },
         });
