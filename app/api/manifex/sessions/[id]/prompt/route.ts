@@ -70,15 +70,40 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // response. Single connection, two events. Image uploads still use
   // the non-SSE path because they go straight to the deep pass.
   if (wantsSse && !image) {
+    // Compact request id so log lines from concurrent requests stay readable.
+    const reqId = Math.random().toString(36).slice(2, 8);
+    const log = (msg: string) => console.log(`[prompt-sse ${reqId} ${id.slice(0, 8)}] ${msg}`);
     const encoder = new TextEncoder();
+    let controllerClosed = false;
+
+    log('start');
+
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const send = (event: string, payload: any) => {
-          controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`));
+          if (controllerClosed) {
+            log(`send(${event}) skipped — controller already closed`);
+            return false;
+          }
+          try {
+            controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`));
+            log(`sent event=${event}`);
+            return true;
+          } catch (e: any) {
+            log(`send(${event}) threw: ${e?.message}`);
+            controllerClosed = true;
+            return false;
+          }
+        };
+        const safeClose = () => {
+          if (controllerClosed) return;
+          try { controller.close(); } catch {}
+          controllerClosed = true;
         };
 
         try {
           // Pass 1 — shallow scaffold.
+          log('shallow start');
           const shallowStarted = Date.now();
           let shallow;
           try {
@@ -86,10 +111,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               conversationContext: conversationContext.length > 0 ? conversationContext : undefined,
               enabledConnectors: enabledConnectors.length > 0 ? enabledConnectors : undefined,
             });
+            log(`shallow returned type=${shallow.type} pages=${Object.keys((shallow as any).result?.pages || {}).length}`);
           } catch (e: any) {
             // The shallow tool sometimes refuses for first-prompt clarification —
             // fall through to the deep pass directly.
-            console.warn('[prompt-sse] shallow failed, falling through to deep:', e?.message);
+            console.warn(`[prompt-sse ${reqId}] shallow failed, falling through to deep:`, e?.message);
             shallow = null;
           }
 
@@ -148,6 +174,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           // draft=true forever and the user is stuck with a non-clickable
           // 'Refining content…' pill.
           const DEEP_TIMEOUT_MS = 6 * 60 * 1000; // 6 minutes
+          log(`deep start hasShallowDraft=${!!shallowDraft}`);
           const deepStarted = Date.now();
           let deep;
           let deepFailure: { kind: string; userMessage: string; detail: string } | null = null;
@@ -161,6 +188,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               setTimeout(() => reject(new Error(`deep pass timed out after ${DEEP_TIMEOUT_MS}ms`)), DEEP_TIMEOUT_MS);
             });
             deep = await Promise.race([deepPromise, timeoutPromise]);
+            log(`deep returned type=${deep.type} after ${Date.now() - deepStarted}ms`);
           } catch (e: any) {
             const cls = classifyError(e);
             // Override the user-facing message for the bare-timeout case.
@@ -168,7 +196,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               cls.kind = 'timeout';
               cls.userMessage = 'The deep refinement is taking unusually long. The structure draft is still here — click Try again to retry, or Never mind to discard.';
             }
-            console.error('[prompt-sse] deep editManifest failed:', cls.kind, cls.detail);
+            log(`deep editManifest failed kind=${cls.kind} detail=${cls.detail}`);
             deepFailure = { kind: cls.kind, userMessage: cls.userMessage, detail: cls.detail };
           }
 
@@ -223,10 +251,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               : null;
 
             try {
+              log('recovery write start');
               const recovered = await updateSession(id, {
                 manifest_state: recoveryManifest,
                 pending_attempt: recoveryPending,
               });
+              log(`recovery write ok draft=${recovered.pending_attempt?.draft}`);
               send('error', {
                 error: deepFailure.userMessage,
                 kind: deepFailure.kind,
@@ -234,22 +264,22 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
                 session: recovered,
               });
             } catch (recoveryErr: any) {
-              console.error('[prompt-sse] recovery write failed:', recoveryErr?.message);
+              log(`recovery write failed: ${recoveryErr?.message}`);
               send('error', {
                 error: deepFailure.userMessage,
                 kind: deepFailure.kind,
                 detail: deepFailure.detail,
               });
             }
-            controller.close();
+            safeClose();
             return;
           }
 
           if (!deep) {
             // Defensive: should be unreachable since deepFailure handles all error paths.
-            console.error('[prompt-sse] deep result is undefined with no failure recorded');
+            log('deep result is undefined with no failure recorded — defensive');
             send('error', { error: 'Internal error: deep pass produced no result', kind: 'unknown' });
-            controller.close();
+            safeClose();
             return;
           }
 
@@ -262,6 +292,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           };
 
           if (deep.type === 'question') {
+            log('deep returned question — persisting + clearing pending');
             // The deep pass turned into a clarifying question after all.
             // Persist the question (overwriting the draft pending_attempt)
             // and stream a 'complete' event with the question payload.
@@ -279,13 +310,14 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
               manifest_state: finalManifest,
               pending_attempt: null,
             });
+            log(`question write ok pending_now=${!!updated.pending_attempt}`);
             send('complete', {
               session: updated,
               response_type: 'question',
               message: deep.result.message,
               questions: deep.result.questions,
             });
-            controller.close();
+            safeClose();
             return;
           }
 
@@ -301,6 +333,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
             ...session.manifest_state,
             conversation: [...existingConversation, userMessage, assistantMessage],
           };
+          log('update write start');
           const updated = await updateSession(id, {
             manifest_state: finalManifest,
             pending_attempt: {
@@ -313,31 +346,44 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
             },
           });
           const deepMs = Date.now() - deepStarted;
-          console.log(`[prompt-sse] deep pass finished in ${deepMs}ms (${Object.keys(deep.result.pages).length} pages)`);
+          log(`update write ok draft=${updated.pending_attempt?.draft} after ${deepMs}ms`);
           send('complete', {
             session: updated,
             response_type: 'update',
             diff_summary: deep.result.diff_summary,
             elapsed_ms: deepMs,
           });
-          controller.close();
+          safeClose();
         } catch (outer: any) {
-          console.error('[prompt-sse] stream crashed:', outer?.message);
+          log(`stream crashed: ${outer?.message}`);
           // Last-resort recovery: clear any draft flag the inner code may
           // have left set so the session doesn't lock the UI.
           try {
+            log('outer recovery: refetching session');
             const refreshed = await getSession(id);
             if (refreshed?.pending_attempt?.draft) {
+              log('outer recovery: clearing draft flag');
               await updateSession(id, {
                 pending_attempt: { ...refreshed.pending_attempt, draft: false },
               });
+              log('outer recovery write ok');
+            } else {
+              log(`outer recovery: nothing to clear (pending=${!!refreshed?.pending_attempt} draft=${refreshed?.pending_attempt?.draft})`);
             }
           } catch (recErr: any) {
-            console.error('[prompt-sse] outer recovery write failed:', recErr?.message);
+            log(`outer recovery write failed: ${recErr?.message}`);
           }
-          try { controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: outer?.message || 'stream crashed' })}\n\n`)); } catch {}
-          controller.close();
+          send('error', { error: outer?.message || 'stream crashed' });
+          safeClose();
+        } finally {
+          log('start() finally');
         }
+      },
+      cancel(reason) {
+        // Fires when the consumer (browser) closes the stream early. Helps
+        // distinguish 'client disconnected mid-deep' from 'server stalled'.
+        log(`stream cancelled by consumer: ${reason || '(no reason)'}`);
+        controllerClosed = true;
       },
     });
 

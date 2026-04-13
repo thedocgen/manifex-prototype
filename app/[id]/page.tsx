@@ -8,6 +8,12 @@ import { generateSkeletonHtml } from '@/lib/skeleton';
 // Tiny SSE reader. Splits the body stream on `\n\n`, parses each event
 // block into { event, data }, and dispatches to the right callback. We
 // only handle the three event names our /prompt route emits.
+//
+// Returns a flag indicating whether a terminal event (complete or error)
+// was observed. The caller uses this to decide whether to do a follow-up
+// session GET — if the connection ends without either, the deep pass may
+// have completed server-side after the client disconnected, and the
+// React state needs to catch up to the DB.
 async function consumePromptStream(
   body: ReadableStream<Uint8Array>,
   handlers: {
@@ -15,10 +21,11 @@ async function consumePromptStream(
     onComplete: (data: any) => void;
     onError: (data: any) => void;
   },
-): Promise<void> {
+): Promise<{ sawTerminal: boolean }> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let sawTerminal = false;
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -38,10 +45,11 @@ async function consumePromptStream(
       try { parsed = JSON.parse(dataLines.join('\n')); }
       catch { continue; }
       if (eventName === 'draft') handlers.onDraft(parsed);
-      else if (eventName === 'complete') handlers.onComplete(parsed);
-      else if (eventName === 'error') handlers.onError(parsed);
+      else if (eventName === 'complete') { handlers.onComplete(parsed); sawTerminal = true; }
+      else if (eventName === 'error') { handlers.onError(parsed); sawTerminal = true; }
     }
   }
+  return { sawTerminal };
 }
 
 type StatusKind = 'idle' | 'thinking' | 'compiling' | 'saving' | 'success' | 'error';
@@ -624,7 +632,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       // SSE branch: parse event stream, handle draft + complete + error.
       const contentType = res.headers.get('content-type') || '';
       if (res.ok && contentType.includes('text/event-stream') && res.body) {
-        await consumePromptStream(res.body, {
+        const { sawTerminal } = await consumePromptStream(res.body, {
           onDraft: (data) => {
             // Stop the progress timers; the draft is on screen now.
             progressTimers.forEach(clearTimeout);
@@ -701,6 +709,35 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             showToast('error', data.error || 'Request failed');
           },
         });
+
+        // Stream ended without a terminal event (complete or error). The
+        // most common cause: client cancelled the fetch or the connection
+        // dropped while the deep pass was still running, so the server
+        // wrote the final state to the DB but the controller was already
+        // closed when it tried to send the 'complete' event. Pull the
+        // server's authoritative state to catch up.
+        if (!sawTerminal) {
+          progressTimers.forEach(clearTimeout);
+          progressTimers.length = 0;
+          setStatus('idle');
+          setStatusMsg('');
+          try {
+            const refresh = await fetch(`/api/manifex/sessions/${id}`);
+            if (refresh.ok) {
+              const fresh = await refresh.json();
+              if (fresh?.session) {
+                setSession(fresh.session);
+                const serverConv: ConversationMessage[] | null = Array.isArray(fresh.session.manifest_state?.conversation)
+                  ? fresh.session.manifest_state.conversation
+                  : null;
+                if (serverConv) {
+                  convoSkipNextPersist.current = true;
+                  setConversation(serverConv);
+                }
+              }
+            }
+          } catch {}
+        }
         return;
       }
 
