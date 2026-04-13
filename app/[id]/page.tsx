@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useRef, use } from 'react';
 import { useRouter } from 'next/navigation';
 import { Markdown, countMatches } from '@/components/Markdown';
 import type { ManifexSession, ManifestState, TreeNode, ConversationMessage, Question } from '@/lib/types';
+import { generateSkeletonHtml } from '@/lib/skeleton';
 
 type StatusKind = 'idle' | 'thinking' | 'compiling' | 'saving' | 'success' | 'error';
 
@@ -427,6 +428,18 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const renderInBackground = async () => {
     setCompiling(true);
     setPreviewError(null);
+    // Show a skeleton wireframe immediately so the user sees something while
+    // the LLM compile runs. Replaced with the real HTML when /render returns.
+    // We base the skeleton on the manifest the compile is about to operate
+    // on (proposed if a pending attempt is open, otherwise the current state).
+    try {
+      const skeletonState = session?.pending_attempt?.proposed_manifest || session?.manifest_state;
+      if (skeletonState && Object.keys(skeletonState.pages).length > 0) {
+        const skeleton = generateSkeletonHtml(skeletonState);
+        setPreviewHtml(skeleton);
+        try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'update', html: skeleton }); } catch {}
+      }
+    } catch {} // skeleton failures are non-fatal
     try {
       try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'compiling' }); } catch {}
       const res = await fetch(`/api/manifex/sessions/${id}/render`, { method: 'POST' });
