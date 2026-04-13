@@ -326,20 +326,25 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     return () => window.removeEventListener('message', handler);
   }, []);
 
-  // Presence heartbeat. Pings every 15s while the editor is mounted, sending
-  // the current page so other team members see what we're looking at. The
-  // server returns the peer list in the same response so we don't need a
-  // second round trip. Filters self out client-side.
+  // Presence heartbeat. Strict 30s cadence, paused while the tab is hidden,
+  // and intentionally NOT re-fired on every activePage change — the next
+  // scheduled beat will pick up the new page from a ref. Heartbeat ONLY
+  // updates presencePeers; it never touches session state, so it can't
+  // overwrite a just-received prompt response.
+  const activePageRef = useRef(activePage);
+  useEffect(() => { activePageRef.current = activePage; }, [activePage]);
+
   useEffect(() => {
-    if (!session) return;
+    if (!session?.id) return;
     let cancelled = false;
     const myUserId = session.user_id || 'local-dev-user';
     const beat = async () => {
+      if (typeof document !== 'undefined' && document.hidden) return; // pause when backgrounded
       try {
         const res = await fetch(`/api/manifex/sessions/${id}/presence`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ user_id: myUserId, page_path: activePage || null }),
+          body: JSON.stringify({ user_id: myUserId, page_path: activePageRef.current || null }),
         });
         const data = await res.json().catch(() => ({}));
         if (cancelled || !data?.entries) return;
@@ -351,9 +356,17 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       } catch {}
     };
     beat();
-    const interval = setInterval(beat, 15000);
-    return () => { cancelled = true; clearInterval(interval); };
-  }, [session?.id, activePage]);
+    const interval = setInterval(beat, 30000);
+    // Beat once immediately when the tab becomes visible again so peers see
+    // the user is back; also resume the cadence from there.
+    const onVisibility = () => { if (!document.hidden) beat(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [session?.id, id]);
 
   // When edit mode toggles, push state into the iframe.
   useEffect(() => {
@@ -584,6 +597,19 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           timestamp: new Date().toISOString(),
         };
         setConversation(prev => [...prev, assistantMsg]);
+
+        // Safety net: re-fetch the session from the server. Concurrent writes
+        // (presence, conversation persist) and React state batching have
+        // historically left the local session out of sync with the server's
+        // latest pending_attempt. A direct read-back guarantees the UI lands
+        // on the truth even if intermediate setState calls were dropped.
+        try {
+          const refresh = await fetch(`/api/manifex/sessions/${id}`);
+          if (refresh.ok) {
+            const fresh = await refresh.json();
+            if (fresh?.session) setSession(fresh.session);
+          }
+        } catch {}
       }
     } catch (e: any) {
       // Error recovery: friendly message in conversation
