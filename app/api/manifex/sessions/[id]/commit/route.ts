@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSession, getProject } from '@/lib/store';
 import { commitFiles } from '@/lib/github';
+import { COMPILER_VERSION } from '@/lib/modal';
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -35,7 +36,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
 
   const lock = JSON.stringify({
     manifest_sha: session.manifest_state.sha,
-    compiler_version: 'manifex-claude-sonnet-4-v2',
+    compiler_version: COMPILER_VERSION,
     committed_at: new Date().toISOString(),
     project_id: project.id,
     page_count: Object.keys(session.manifest_state.pages).length,

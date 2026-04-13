@@ -8,7 +8,12 @@ import { buildConnectorsBlock } from './connectors';
 import type { CodexFiles, CompiledCodex, ManifestState, DocPage, TreeNode, Question, ConversationMessage } from './types';
 import { serializePages } from './types';
 
-const COMPILER_VERSION = 'manifex-claude-sonnet-4-v5-contract-first';
+// Single source of truth for the compiler version. Bumping this string
+// invalidates every cached compilation across all routes that read the
+// cache. Re-exported so route handlers can import this constant instead
+// of hard-coding it (we drifted to three different versions before
+// extracting this).
+export const COMPILER_VERSION = 'manifex-claude-sonnet-4-v5-contract-first';
 const MODEL = 'claude-sonnet-4-5-20250929';
 
 let _client: Anthropic | null = null;

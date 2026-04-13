@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getSession, getCachedCompilation, putCachedCompilation, getSecrets } from '@/lib/store';
-import { compileManifestToCodex } from '@/lib/modal';
+import { compileManifestToCodex, COMPILER_VERSION } from '@/lib/modal';
 import { inlineCodex } from '@/lib/codex';
 import type { ManifestState, CompiledCodex } from '@/lib/types';
 
@@ -102,7 +102,6 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
-  const COMPILER_VERSION = 'manifex-claude-sonnet-4-v5-contract-first';
   const manifestSha = session.manifest_state.sha;
 
   // Check exact cache first

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getSession, getCachedCompilation } from '@/lib/store';
 import { inlineCodex } from '@/lib/codex';
+import { COMPILER_VERSION } from '@/lib/modal';
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -10,7 +11,6 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
   // Only return cached compilation if the docs have real content
   // (more than just the starter overview page). This ensures the
   // doc-first flow: preview stays hidden until docs are built.
-  const COMPILER_VERSION = 'manifex-claude-sonnet-4-v3';
   const pageCount = Object.keys(session.manifest_state.pages).length;
   let inlined_html: string | null = null;
 
