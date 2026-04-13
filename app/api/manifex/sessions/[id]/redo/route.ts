@@ -15,6 +15,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     history: newHistory,
     redo_stack: newRedo,
     manifest_state: next,
+    pending_attempt: null,
   });
 
   return NextResponse.json({ session: updated });
