@@ -169,6 +169,7 @@ async function createMachine(appName: string): Promise<string> {
       checks: {
         ready: {
           type: 'http',
+          port: 8080,
           method: 'GET',
           path: '/__health',
           interval: '15s',

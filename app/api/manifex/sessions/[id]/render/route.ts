@@ -2,7 +2,22 @@ import { NextResponse } from 'next/server';
 import { getSession, getCachedCompilation, putCachedCompilation, getSecrets } from '@/lib/store';
 import { compileManifestToCodex, COMPILER_VERSION } from '@/lib/modal';
 import { inlineCodex } from '@/lib/codex';
-import type { ManifestState, CompiledCodex } from '@/lib/types';
+import { syncDevbox, type DevboxState } from '@/lib/devbox';
+import type { ManifestState, CompiledCodex, ManifexSession } from '@/lib/types';
+
+// Best-effort fire-and-forget devbox sync. Called after every successful
+// render path. Never blocks the render response — devbox sync failures are
+// logged and ignored, the user still gets their compiled output back via
+// the normal JSON path. The iframe in the editor reloads via SSE when the
+// /__sync POST lands on the devbox.
+function pushToDevboxIfPresent(session: ManifexSession, html: string): void {
+  const devbox: DevboxState | null | undefined = (session.manifest_state as any)?.devbox;
+  if (!devbox?.url) return;
+  syncDevbox(devbox.url, html).then(r => {
+    if (r.ok) console.log(`[render] devbox sync ok ${devbox.url} (${r.bytes} bytes)`);
+    else console.warn(`[render] devbox sync failed ${devbox.url}: ${r.error}`);
+  }).catch(() => {});
+}
 
 const STYLES_PAGE_PATHS = ['styles', 'look-and-feel', 'look_and_feel'];
 
@@ -109,6 +124,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   if (compiled) {
     console.log(`[render] cache HIT for sha ${manifestSha.slice(0, 12)}`);
     const inlined = inlineCodex(compiled.files);
+    pushToDevboxIfPresent(session, inlined);
     return NextResponse.json({
       codex: compiled,
       inlined_html: inlined,
@@ -164,6 +180,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   }
 
   if (cssOnlyResult) {
+    pushToDevboxIfPresent(session, cssOnlyResult.inlinedHtml);
     return NextResponse.json({
       codex: cssOnlyResult.compiled,
       inlined_html: cssOnlyResult.inlinedHtml,
@@ -192,6 +209,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   await putCachedCompilation(manifestSha, COMPILER_VERSION, compiled);
 
   const inlined = inlineCodex(compiled.files);
+  pushToDevboxIfPresent(session, inlined);
 
   return NextResponse.json({
     codex: compiled,
