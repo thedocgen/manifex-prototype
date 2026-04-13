@@ -13,7 +13,10 @@
 const FLY_API_BASE = 'https://api.machines.dev/v1';
 const FLY_ORG = 'personal';
 const FLY_REGION = 'iad';
-const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:latest';
+// Phase 2B: v2-ubuntu is the blank Ubuntu 24.04 + generic agent image that
+// hosts real multi-file projects. The old :latest tag (v1 HTML-blob agent)
+// is intentionally left in the registry for rollback until UAT passes.
+const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v2-ubuntu';
 const APP_PREFIX = 'manifex-app-';
 const MAX_ACTIVE_DEVBOXES = 3;
 
@@ -176,9 +179,12 @@ async function createMachine(appName: string): Promise<string> {
         },
       },
       guest: {
+        // Phase 2B: blank-Ubuntu devboxes install real project dependencies
+        // (Next.js, better-sqlite3, etc.) inside the machine. 256 MB OOMs on
+        // `npm install` alone. Jesse authorized the bump to 1 GB / 2 vCPU.
         cpu_kind: 'shared',
-        cpus: 1,
-        memory_mb: 256,
+        cpus: 2,
+        memory_mb: 1024,
       },
       restart: { policy: 'on-failure', max_retries: 3 },
     },
@@ -298,6 +304,227 @@ export async function sleepDevbox(appName: string, machineId: string): Promise<v
   if (!res.ok && res.status !== 404) {
     const text = await res.text();
     throw new Error(`sleepDevbox(${appName}/${machineId}) failed: ${res.status} ${text}`);
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Phase 2B provisioning: POST /__files, run setup.sh, detach run.sh,
+// wait for the dev-server port, broadcast a reload.
+// ════════════════════════════════════════════════════════════════════════
+//
+// The v1 syncDevbox above POSTs a single HTML blob to /__sync on the
+// v1 agent image. provisionDevboxProject is the v2 equivalent: it stages
+// a full multi-file project into /app/workspace, runs the LLM-emitted
+// setup.sh (streaming logs to /__logs so the editor UI can show progress),
+// starts run.sh detached so the dev server keeps running after the HTTP
+// request returns, waits for the proxied port to come up, and fires a
+// /__reload so the iframe refreshes to the newly-running app.
+//
+// Everything is best-effort and structured — callers get a tagged union
+// back so they can render a "setup failed" UX distinctly from "dev server
+// never came up" distinctly from "files POST errored", rather than a
+// collapsed boolean.
+
+export interface ProvisionResult {
+  ok: boolean;
+  stage:
+    | 'files'
+    | 'setup'
+    | 'run'
+    | 'wait_port'
+    | 'reload'
+    | 'done';
+  detail?: string;
+  files_written?: number;
+  setup_exit_code?: number;
+  setup_duration_ms?: number;
+  dev_port?: number;
+  wait_ms?: number;
+}
+
+/**
+ * Full provisioning sequence against a v2-ubuntu devbox agent. Should
+ * complete in ~20-120s for a cached-ish setup and ~60-180s cold. The
+ * caller is expected to have gated against concurrent calls on the
+ * same devbox — the agent accepts concurrent /__exec calls but running
+ * two setup.sh at once will trip over each other.
+ */
+export async function provisionDevboxProject(
+  url: string,
+  project: {
+    files: Record<string, string>;
+    setup: string;
+    run: string;
+    port: number;
+  },
+  opts: { skipSetup?: boolean } = {}
+): Promise<ProvisionResult> {
+  const base = url.replace(/\/+$/, '');
+  // Stage all files under /app/workspace. Include setup.sh and run.sh
+  // as regular files so the exec calls can bash them in place.
+  const allFiles: Record<string, string> = {
+    ...project.files,
+    'setup.sh': project.setup,
+    'run.sh': project.run,
+  };
+
+  // ---- 1. POST /__files -------------------------------------------------
+  try {
+    const res = await fetch(`${base}/__files`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(allFiles),
+      // Large payloads: a full Next.js project can be a few hundred KB.
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      return { ok: false, stage: 'files', detail: `${res.status} ${text}`.slice(0, 300) };
+    }
+    const data = (await res.json().catch(() => ({}))) as { files?: number };
+    const filesWritten = data.files ?? Object.keys(allFiles).length;
+
+    // ---- 2. POST /__exec bash setup.sh (synchronous) -------------------
+    let setupExitCode = 0;
+    let setupDurationMs = 0;
+    if (!opts.skipSetup) {
+      const setupRes = await fetch(`${base}/__exec`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cmd: 'bash setup.sh', cwd: '/app/workspace' }),
+        // setup.sh can take 30-180s (apt + npm install). Generous cap.
+        signal: AbortSignal.timeout(300_000),
+      });
+      if (!setupRes.ok) {
+        const text = await setupRes.text().catch(() => '');
+        return {
+          ok: false,
+          stage: 'setup',
+          detail: `exec endpoint ${setupRes.status}: ${text}`.slice(0, 300),
+          files_written: filesWritten,
+        };
+      }
+      const setupData = (await setupRes.json().catch(() => ({}))) as {
+        exit_code?: number;
+        duration_ms?: number;
+        ok?: boolean;
+      };
+      setupExitCode = setupData.exit_code ?? -1;
+      setupDurationMs = setupData.duration_ms ?? 0;
+      if (!setupData.ok || setupExitCode !== 0) {
+        return {
+          ok: false,
+          stage: 'setup',
+          detail: `setup.sh exited ${setupExitCode}`,
+          files_written: filesWritten,
+          setup_exit_code: setupExitCode,
+          setup_duration_ms: setupDurationMs,
+        };
+      }
+    }
+
+    // ---- 3. POST /__exec bash run.sh (detached) ------------------------
+    const runRes = await fetch(`${base}/__exec`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ cmd: 'bash run.sh', cwd: '/app/workspace', detach: true }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!runRes.ok) {
+      const text = await runRes.text().catch(() => '');
+      return {
+        ok: false,
+        stage: 'run',
+        detail: `exec endpoint ${runRes.status}: ${text}`.slice(0, 300),
+        files_written: filesWritten,
+        setup_exit_code: setupExitCode,
+        setup_duration_ms: setupDurationMs,
+      };
+    }
+
+    // ---- 4. Wait for the proxied dev server to respond -----------------
+    // We hit GET / on the agent, which proxies to 127.0.0.1:<port> inside
+    // the container. While the dev server is still booting, the agent
+    // returns the 200 "Building your app…" stub (a deliberate UX choice
+    // so iframe users see something other than a white page). We detect
+    // readiness by asking the agent /__health and reading its dev_port
+    // + whether the proxied endpoint returns a Next.js response.
+    const waitStarted = Date.now();
+    const MAX_WAIT_MS = 180_000; // 3 min — Next.js first boot on a blank box is slow
+    const POLL_MS = 1500;
+    let portReady = false;
+    let lastDevPort = project.port;
+    while (Date.now() - waitStarted < MAX_WAIT_MS) {
+      try {
+        const healthRes = await fetch(`${base}/__health`, {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (healthRes.ok) {
+          const health = (await healthRes.json().catch(() => ({}))) as {
+            dev_running?: boolean;
+            dev_port?: number;
+          };
+          if (typeof health.dev_port === 'number') lastDevPort = health.dev_port;
+          // dev_running just means "the detached process is alive" — not
+          // that the socket is listening. Probe the proxied path too.
+          if (health.dev_running) {
+            const probe = await fetch(`${base}/`, { signal: AbortSignal.timeout(5000) })
+              .catch(() => null);
+            if (probe && probe.ok) {
+              // Check if we got a real response vs. the stub. The stub
+              // contains the "Building your app…" literal, Next.js won't.
+              const body = await probe.text().catch(() => '');
+              if (!body.includes('Building your app…')) {
+                portReady = true;
+                break;
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore transient probe errors — we'll retry on the next tick.
+      }
+      await new Promise(r => setTimeout(r, POLL_MS));
+    }
+
+    const waitMs = Date.now() - waitStarted;
+    if (!portReady) {
+      return {
+        ok: false,
+        stage: 'wait_port',
+        detail: `dev server did not respond within ${Math.round(waitMs / 1000)}s`,
+        files_written: filesWritten,
+        setup_exit_code: setupExitCode,
+        setup_duration_ms: setupDurationMs,
+        dev_port: lastDevPort,
+        wait_ms: waitMs,
+      };
+    }
+
+    // ---- 5. Fire a reload broadcast ------------------------------------
+    // The agent's /__reload convenience endpoint handles the SSE fan-out
+    // for us. Fire-and-forget: the iframe will have already been polling
+    // /__events since the user opened the session.
+    fetch(`${base}/__reload`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => {});
+
+    return {
+      ok: true,
+      stage: 'done',
+      files_written: filesWritten,
+      setup_exit_code: setupExitCode,
+      setup_duration_ms: setupDurationMs,
+      dev_port: lastDevPort,
+      wait_ms: waitMs,
+    };
+  } catch (e: any) {
+    return {
+      ok: false,
+      stage: 'files',
+      detail: (e?.message || String(e)).slice(0, 300),
+    };
   }
 }
 
