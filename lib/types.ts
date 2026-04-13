@@ -31,6 +31,7 @@ export interface PendingAttempt {
 export interface ManifexProject {
   id: string;
   user_id: string;
+  team_id: string | null;  // Phase 1: nullable until backfilled. Solo users see LOCAL_DEV_TEAM.
   name: string;
   github_repo: string;
   github_repo_id: number | null;
@@ -89,6 +90,29 @@ export const LOCAL_DEV_USER = {
   name: 'Local Developer',
   email: 'local@manifex.dev',
 };
+
+// Team Phase 1 — additive. Solo users transparently belong to this team.
+// Same UUID as in db/migrations/001_teams.sql so the backfill aligns.
+export const LOCAL_DEV_TEAM = {
+  id: '00000000-0000-0000-0000-000000000001',
+  name: 'Personal (local dev)',
+};
+
+export type TeamRole = 'owner' | 'editor' | 'viewer';
+
+export interface ManifexTeam {
+  id: string;
+  name: string;
+  created_by: string;
+  created_at: string;
+}
+
+export interface ManifexTeamMember {
+  team_id: string;
+  user_id: string;
+  role: TeamRole;
+  joined_at: string;
+}
 
 // ── Helpers ──
 
