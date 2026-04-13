@@ -13,10 +13,13 @@
 const FLY_API_BASE = 'https://api.machines.dev/v1';
 const FLY_ORG = 'personal';
 const FLY_REGION = 'iad';
-// Phase 2B: v2-ubuntu is the blank Ubuntu 24.04 + generic agent image that
-// hosts real multi-file projects. The old :latest tag (v1 HTML-blob agent)
-// is intentionally left in the registry for rollback until UAT passes.
-const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v2-ubuntu';
+// Phase 2B Path A: v2.1-ubuntu adds CORS on every agent endpoint so the
+// manifex-wip editor can orchestrate provisioning from the browser (POST
+// /__files, /__exec, SSE /__logs and /__events) without holding a Node
+// request open on the editor box for the full 3-5 min cold provision.
+// v2-ubuntu remains in the registry as the intermediate rollback target,
+// :latest is still v1 HTML-blob.
+const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v2.1-ubuntu';
 const APP_PREFIX = 'manifex-app-';
 const MAX_ACTIVE_DEVBOXES = 3;
 
@@ -143,10 +146,63 @@ async function ensurePublicIp(appName: string): Promise<void> {
 }
 
 /**
- * Create a single machine in the session's app, pulling the prebuilt
- * devbox image. Returns the new machine's id.
+ * Ensure a Fly volume exists for the session's workspace. Volumes
+ * survive machine stop/start cycles, so apt-installed packages,
+ * node_modules, the Next.js .next cache, and the SQLite data.db all
+ * persist across the lifecycle — a stopped box that starts back up
+ * skips setup.sh entirely and run.sh comes up in seconds rather than
+ * re-installing 158 npm deps from scratch every session.
+ *
+ * Idempotent: if a volume with the given name already exists, returns
+ * it. Otherwise creates one sized at SIZE_GB in the same region the
+ * machine will land in.
  */
-async function createMachine(appName: string): Promise<string> {
+const WORKSPACE_VOLUME_NAME = 'workspace';
+const WORKSPACE_VOLUME_SIZE_GB = 5;
+
+async function ensureWorkspaceVolume(appName: string): Promise<string> {
+  // Check for an existing volume first.
+  const listRes = await flyFetch(`/apps/${encodeURIComponent(appName)}/volumes`, { method: 'GET' });
+  if (listRes.ok) {
+    const vols = (await listRes.json().catch(() => [])) as Array<{ id?: string; name?: string; region?: string }>;
+    if (Array.isArray(vols)) {
+      for (const v of vols) {
+        if (v && v.name === WORKSPACE_VOLUME_NAME && v.region === FLY_REGION && v.id) {
+          return v.id;
+        }
+      }
+    }
+  }
+  // Create a new volume.
+  const createRes = await flyFetch(`/apps/${encodeURIComponent(appName)}/volumes`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: WORKSPACE_VOLUME_NAME,
+      region: FLY_REGION,
+      size_gb: WORKSPACE_VOLUME_SIZE_GB,
+      // No encryption for v1 — per-session ephemeral workspaces don't hold
+      // anything more sensitive than the user's compiled app code, which
+      // is already stored in Supabase.
+    }),
+  });
+  if (!createRes.ok) {
+    const text = await createRes.text();
+    throw new Error(`ensureWorkspaceVolume(${appName}) failed: ${createRes.status} ${text}`);
+  }
+  const data = await createRes.json();
+  if (!data?.id) {
+    throw new Error(`ensureWorkspaceVolume(${appName}) returned no id: ${JSON.stringify(data)}`);
+  }
+  return data.id as string;
+}
+
+/**
+ * Create a single machine in the session's app, pulling the prebuilt
+ * devbox image, with /app/workspace mounted from the session's Fly
+ * volume so node_modules + apt state survive stop/start. Returns the
+ * new machine's id.
+ */
+async function createMachine(appName: string, volumeId: string): Promise<string> {
   const body = {
     name: 'devbox',
     region: FLY_REGION,
@@ -154,6 +210,12 @@ async function createMachine(appName: string): Promise<string> {
       image: DEVBOX_IMAGE,
       auto_destroy: false,
       env: { PORT: '8080' },
+      mounts: [
+        {
+          volume: volumeId,
+          path: '/app/workspace',
+        },
+      ],
       services: [
         {
           ports: [
@@ -249,7 +311,8 @@ export async function createDevbox(sessionId: string): Promise<CreateDevboxResul
   try {
     await ensureApp(appName);
     await ensurePublicIp(appName);
-    const machineId = await createMachine(appName);
+    const volumeId = await ensureWorkspaceVolume(appName);
+    const machineId = await createMachine(appName, volumeId);
     return {
       ok: true,
       state: {
@@ -290,6 +353,27 @@ export async function syncDevbox(url: string, html: string): Promise<{ ok: boole
     return { ok: true, bytes: data?.bytes };
   } catch (e: any) {
     return { ok: false, error: (e?.message || String(e)).slice(0, 200) };
+  }
+}
+
+/**
+ * Start a stopped machine. Idempotent — returns successfully when the
+ * machine is already running. Part of the Phase 2B Path A lifecycle:
+ * when a user's editor tab becomes visible, the server starts the
+ * paired devbox; when the tab goes idle for 60s, the server stops it.
+ * The Fly volume mounted at /app/workspace keeps setup.sh's state
+ * across stop/start so cold boots are fast.
+ */
+export async function startDevboxMachine(appName: string, machineId: string): Promise<void> {
+  const res = await flyFetch(`/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}/start`, {
+    method: 'POST',
+  });
+  if (!res.ok && res.status !== 404) {
+    // 200/412 are both "fine" — 412 is Fly's "already started".
+    if (res.status !== 412) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`startDevboxMachine(${appName}/${machineId}) failed: ${res.status} ${text}`);
+    }
   }
 }
 

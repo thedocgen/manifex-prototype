@@ -540,11 +540,194 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   // navigating between sessions.
   useEffect(() => () => { closeBuildLogStream(); }, [closeBuildLogStream]);
 
+  // Phase 2B Path A lifecycle: keep the session's devbox machine
+  // running while this editor tab is visible, stop it when the user
+  // leaves. Heartbeats POST to /heartbeat every 15s and start the
+  // machine if Fly has auto-stopped it. On tab hidden / beforeunload
+  // we fire /stop-machine via sendBeacon so the stop survives a tab
+  // closing. Machines auto-destroy=false so explicit stops don't
+  // lose the volume-backed workspace.
+  useEffect(() => {
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+    let stopped = false;
+
+    const sendHeartbeat = () => {
+      fetch(`/api/manifex/sessions/${id}/heartbeat`, {
+        method: 'POST',
+        keepalive: true,
+      }).catch(() => {});
+    };
+
+    const stopMachine = () => {
+      if (stopped) return;
+      stopped = true;
+      try {
+        // sendBeacon survives page unload.
+        const url = `/api/manifex/sessions/${id}/stop-machine`;
+        if (typeof navigator !== 'undefined' && navigator.sendBeacon) {
+          const blob = new Blob(['{}'], { type: 'application/json' });
+          navigator.sendBeacon(url, blob);
+        } else {
+          fetch(url, { method: 'POST', keepalive: true }).catch(() => {});
+        }
+      } catch {}
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        stopped = false;
+        sendHeartbeat();
+      } else {
+        stopMachine();
+      }
+    };
+
+    // Kick off immediately so the devbox warms up in parallel with
+    // the session load. Then tick every 15s. Fly idle_timeout is
+    // generous enough that we don't need anything tighter.
+    sendHeartbeat();
+    heartbeatTimer = setInterval(sendHeartbeat, 15_000);
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('beforeunload', stopMachine);
+
+    return () => {
+      if (heartbeatTimer) clearInterval(heartbeatTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('beforeunload', stopMachine);
+      // Intentionally do NOT fire stopMachine on React strict-mode
+      // unmount — React unmounts on development StrictMode double-
+      // invoke and in prod only on real navigation, which beforeunload
+      // already catches. A blanket stop here would race the heartbeat
+      // every time a dev hot-reloads.
+    };
+  }, [id]);
+
   // Auto-scroll the log panel to the bottom as new lines stream in.
   useEffect(() => {
     const el = buildLogRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [buildLog]);
+
+  // Phase 2B Path A browser-driven provisioning. The server's /render
+  // route now returns { files, skip_setup, devbox_url, build_log_url,
+  // ... } immediately after compile; the client orchestrates the slow
+  // provisioning work against the devbox agent directly so the server
+  // Fly Machine can idle without dropping a long-running HTTP request.
+  //
+  // Steps the client drives:
+  //   1. POST /api/manifex/sessions/<id>/devbox  (idempotent, returns
+  //      session with attached devbox)
+  //   2. Open EventSource(devbox.url + /__logs) so the build log panel
+  //      starts live-tailing before setup.sh begins.
+  //   3. POST /api/manifex/sessions/<id>/render  (server compiles,
+  //      returns files + setup flag + devbox URLs).
+  //   4. POST <devbox>/__files with files (stage+swap workspace).
+  //   5. Unless skip_setup: POST <devbox>/__exec bash setup.sh, wait
+  //      for synchronous response. On 0 exit, POST /provisioned to
+  //      persist last_provisioned_sha so the next render can skip.
+  //   6. POST <devbox>/__exec bash run.sh with detach:true.
+  //   7. Poll <devbox>/__health every 1.5s until dev_running=true and
+  //      a probe GET / returns a non-stub response.
+  //   8. Force an iframe reload to the devbox URL.
+  //
+  // Errors at any stage flip previewError and keep the log panel open
+  // so the user can read the failure detail inline.
+  const provisionDevboxFromClient = async (
+    devboxUrl: string,
+    files: Record<string, string>,
+    skipSetup: boolean,
+    manifestSha: string,
+  ): Promise<{ ok: boolean; stage: string; detail?: string }> => {
+    const base = devboxUrl.replace(/\/+$/, '');
+
+    setProvisionStage('files');
+    try {
+      const filesRes = await fetch(`${base}/__files`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(files),
+      });
+      if (!filesRes.ok) {
+        return { ok: false, stage: 'files', detail: `__files ${filesRes.status}` };
+      }
+    } catch (e: any) {
+      return { ok: false, stage: 'files', detail: e?.message || String(e) };
+    }
+
+    if (!skipSetup) {
+      setProvisionStage('setup');
+      try {
+        const setupRes = await fetch(`${base}/__exec`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ cmd: 'bash setup.sh', cwd: '/app/workspace' }),
+        });
+        if (!setupRes.ok) {
+          return { ok: false, stage: 'setup', detail: `__exec setup ${setupRes.status}` };
+        }
+        const setupData = await setupRes.json().catch(() => ({}));
+        if (!setupData?.ok || setupData?.exit_code !== 0) {
+          return {
+            ok: false,
+            stage: 'setup',
+            detail: `setup.sh exited ${setupData?.exit_code ?? '?'}`,
+          };
+        }
+        // Persist last_provisioned_sha so the next render can skip.
+        try {
+          await fetch(`/api/manifex/sessions/${id}/provisioned`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sha: manifestSha }),
+          });
+        } catch {} // non-fatal — worst case next build re-runs setup
+      } catch (e: any) {
+        return { ok: false, stage: 'setup', detail: e?.message || String(e) };
+      }
+    }
+
+    setProvisionStage('run');
+    try {
+      const runRes = await fetch(`${base}/__exec`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cmd: 'bash run.sh', cwd: '/app/workspace', detach: true }),
+      });
+      if (!runRes.ok) {
+        return { ok: false, stage: 'run', detail: `__exec run ${runRes.status}` };
+      }
+    } catch (e: any) {
+      return { ok: false, stage: 'run', detail: e?.message || String(e) };
+    }
+
+    setProvisionStage('wait_port');
+    const waitStarted = Date.now();
+    const MAX_WAIT_MS = 240_000;
+    const POLL_MS = 1500;
+    while (Date.now() - waitStarted < MAX_WAIT_MS) {
+      try {
+        const h = await fetch(`${base}/__health`);
+        if (h.ok) {
+          const health = await h.json().catch(() => ({}));
+          if (health?.dev_running) {
+            // Probe the proxied root — agent returns a stub on ECONNREFUSED,
+            // so we only count a response that doesn't contain "Building
+            // your app…" as genuinely ready.
+            const probe = await fetch(`${base}/`, { cache: 'no-store' }).catch(() => null);
+            if (probe && probe.ok) {
+              const body = await probe.text().catch(() => '');
+              if (!body.includes('Building your app…')) {
+                setProvisionStage('done');
+                return { ok: true, stage: 'done' };
+              }
+            }
+          }
+        }
+      } catch {}
+      await new Promise(r => setTimeout(r, POLL_MS));
+    }
+    return { ok: false, stage: 'wait_port', detail: `dev server did not respond within ${Math.round(MAX_WAIT_MS / 1000)}s` };
+  };
 
   const renderInBackground = async () => {
     setCompiling(true);
@@ -595,31 +778,47 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     } catch {} // skeleton failures are non-fatal
     try {
       try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'compiling' }); } catch {}
+      setProvisionStage('compile');
       const res = await fetch(`/api/manifex/sessions/${id}/render`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
-      // Reflect provision stage + any failure detail regardless of ok status.
-      if (data?.provision?.stage) setProvisionStage(data.provision.stage);
       if (!res.ok) {
-        const stage = data?.provision?.stage;
-        const stageDetail = data?.provision?.detail;
-        const base = data?.error || 'Something went wrong building your app. Try making another change.';
-        setPreviewError(stage ? `${base} (${stage}${stageDetail ? ': ' + stageDetail : ''})` : base);
-        // Keep the log panel open on failure so the user can read the
-        // last lines that explain why setup.sh or the dev server failed.
+        setPreviewError(data?.error || 'Something went wrong building your app. Try making another change.');
         return;
       }
-      if (data.inlined_html) {
-        setPreviewHtml(data.inlined_html);
-        try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'update', html: data.inlined_html }); } catch {}
+      if (!data?.files || !data?.devbox_url) {
+        setPreviewError('Compile succeeded but no devbox was attached. Try reopening the session.');
+        return;
       }
-      // On a successful build, collapse the log panel after a short delay
-      // so the user's attention returns to the working preview. Leaves
-      // the log content in state in case they reopen the panel.
-      if (data?.devbox_provisioned) {
-        setTimeout(() => setBuildLogOpen(false), 2500);
+
+      // Drive the provision pipeline directly against the devbox agent.
+      const result = await provisionDevboxFromClient(
+        data.devbox_url,
+        data.files as Record<string, string>,
+        Boolean(data.skip_setup),
+        String(data.manifest_sha),
+      );
+
+      if (!result.ok) {
+        setPreviewError(
+          `Build stalled at ${result.stage}${result.detail ? `: ${result.detail}` : ''}`,
+        );
+        return;
       }
-    } catch {
-      setPreviewError('Couldn\'t connect to the build service. Try again in a moment.');
+
+      // Flip the iframe from the skeleton to the live devbox. Setting
+      // previewHtml to a stub is purely a gate for the existing render
+      // condition in the JSX; the iframe itself src=s the devbox URL
+      // directly so the actual pixels come from the live Next.js dev
+      // server we just provisioned.
+      setPreviewHtml('<!-- manifex v7: preview rendered from devbox -->');
+      try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'reload' }); } catch {}
+      try { iframeRef.current?.contentWindow?.location.reload(); } catch {}
+
+      // Collapse the log panel shortly after success — content stays in
+      // state so the user can reopen it via the 'Build log' button.
+      setTimeout(() => setBuildLogOpen(false), 2500);
+    } catch (e: any) {
+      setPreviewError(e?.message ? `Couldn't build: ${e.message}` : 'Couldn\'t connect to the build service. Try again in a moment.');
     } finally {
       setCompiling(false);
       closeBuildLogStream();
@@ -1704,15 +1903,19 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                   Try rebuilding
                 </button>
               </div>
-            ) : previewHtml ? (
+            ) : (previewHtml || (session?.manifest_state as any)?.devbox?.url) ? (
               <div style={{ position: 'relative', width: '100%', height: '100%' }}>
                 {(() => {
-                  // Phase 2A: when the session has a Fly devbox provisioned,
-                  // point the iframe at its public URL via src= and let the
-                  // devbox's /__events SSE stream drive reloads on every
-                  // /__sync from the render route. Falls back to the
-                  // srcDoc/PREVIEW_BRIDGE_SCRIPT path for sessions without
-                  // a devbox (legacy + offline dev).
+                  // Phase 2B Path A: once a session has a Fly devbox attached
+                  // we always render the iframe pointing at its public URL,
+                  // independent of whether /render has returned yet. The
+                  // devbox agent serves a "Building your app…" stub when
+                  // the dev server isn't up yet, and flips to the live
+                  // Next.js app once run.sh has started listening. That
+                  // means the iframe is useful the moment the user opens
+                  // a session — no more waiting on a compile+provision
+                  // round-trip to show anything. previewHtml is kept as
+                  // a legacy fallback for sessions without a devbox.
                   const devbox = (session?.manifest_state as any)?.devbox;
                   if (devbox?.url) {
                     return (

@@ -288,10 +288,39 @@ function proxyToDevServer(req, res) {
   req.pipe(proxyReq);
 }
 
+// ---- CORS ---------------------------------------------------------------
+// Phase 2B Path A: the manifex-wip editor orchestrates provisioning from
+// the browser (POST /__files, POST /__exec, poll /__health, SSE /__logs
+// and /__events) so the editor's own Fly Machine can go idle during a
+// long apt + npm build without dropping the request. The agent therefore
+// has to accept cross-origin requests from https://manifex-wip.fly.dev
+// (and localhost during dev). Open Origin; this box is ephemeral per
+// session and only ever serves one project.
+function applyCors(res, req) {
+  const origin = (req && req.headers && req.headers.origin) || '*';
+  res.setHeader('access-control-allow-origin', origin);
+  res.setHeader('access-control-allow-methods', 'GET, POST, OPTIONS');
+  res.setHeader('access-control-allow-headers', 'content-type, authorization, accept');
+  res.setHeader('access-control-max-age', '86400');
+  res.setHeader('vary', 'origin');
+}
+
 // ---- Router --------------------------------------------------------------
 const server = http.createServer(async (req, res) => {
   const url = req.url || '/';
   const method = req.method || 'GET';
+
+  // Apply CORS headers on every response before we branch into handlers.
+  // The /* proxy path strips them back out so user-app responses don't
+  // inherit wide-open CORS from the agent — only agent endpoints expose it.
+  applyCors(res, req);
+
+  // Preflight: short-circuit every OPTIONS to a 204 with the CORS headers.
+  if (method === 'OPTIONS') {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
 
   try {
     if (url === '/__files' && method === 'POST') return await handleFiles(req, res);
@@ -301,7 +330,13 @@ const server = http.createServer(async (req, res) => {
     if (url === '/__reload' && method === 'POST') return handleEventTrigger(req, res);
     if (url === '/__health' && method === 'GET') return handleHealth(req, res);
 
-    // Anything else proxies to the user's dev server.
+    // Anything else proxies to the user's dev server. Strip the agent CORS
+    // headers first so user-app responses don't pretend to be CORS-open.
+    res.removeHeader('access-control-allow-origin');
+    res.removeHeader('access-control-allow-methods');
+    res.removeHeader('access-control-allow-headers');
+    res.removeHeader('access-control-max-age');
+    res.removeHeader('vary');
     return proxyToDevServer(req, res);
   } catch (e) {
     if (!res.headersSent) {

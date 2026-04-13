@@ -1,136 +1,27 @@
 import { NextResponse } from 'next/server';
-import { getSession, getCachedProject, putCachedProject, getSecrets, updateSession } from '@/lib/store';
+import { getSession, getCachedProject, putCachedProject, getSecrets } from '@/lib/store';
 import { compileManifestToProject, PROJECT_COMPILER_VERSION } from '@/lib/modal';
-import { provisionDevboxProject, type DevboxState } from '@/lib/devbox';
 import type { CompiledProject, ManifexSession } from '@/lib/types';
 
-// Phase 2B render route. Replaces the v1 HTML-blob compile + /__sync flow
-// with the v7 multi-file compile + /__files + /__exec setup/run + port wait
-// + reload flow.
+// Phase 2B Path A render route. Does the work only the server can do —
+// LLM compile, cache read/write, secret injection — and returns
+// immediately with the project shape plus the devbox endpoint URLs
+// the client will orchestrate against.
 //
-// Flow:
-//   1. Pending-proposal gate (unchanged from v1 — refuse to compile while
-//      the user has unaccepted proposed changes).
-//   2. Project cache lookup (manifest_sha, PROJECT_COMPILER_VERSION).
-//      Cache HIT: re-provision the devbox with setup cached on the
-//      session's last-provisioned sha. If the session's last provisioned
-//      sha matches current manifest_sha, skip setup entirely.
-//      Cache MISS: fall through to compile.
-//   3. Full compile via compileManifestToProject.
-//   4. putCachedProject — persist the new project shape via the reserved
-//      __manifex/setup.sh / __manifex/run.sh / __manifex/port keys.
-//   5. provisionDevboxProject — POST /__files, exec setup.sh (stream to
-//      /__logs), exec run.sh detached, wait for port, broadcast reload.
-//   6. Persist the provisioned sha back on the session so the next render
-//      can skip setup if the spec didn't change.
+// The client (app/[id]/page.tsx → renderInBackground) is responsible
+// for:
+//   1. POST <devbox>/__files with project.files + setup.sh + run.sh
+//   2. POST <devbox>/__exec { cmd: 'bash setup.sh' }, unless skip_setup
+//   3. POST <devbox>/__exec { cmd: 'bash run.sh', detach: true }
+//   4. Poll <devbox>/__health until dev_running + a non-stub GET /
+//   5. POST to /api/manifex/sessions/<id>/provisioned to persist the
+//      current manifest_sha so the next render can skip_setup
+//   6. Trigger an iframe reload
 //
-// Editor log UI (chunk 5) subscribes directly to the devbox's /__logs SSE
-// stream using the build_log_url returned in the response body.
-
-const MAX_PROVISION_WAIT_MS = 240_000;
-
-type DevboxWithProvisionedSha = DevboxState & { last_provisioned_sha?: string };
-
-function getDevbox(session: ManifexSession): DevboxWithProvisionedSha | null {
-  const d = (session.manifest_state as any)?.devbox;
-  if (!d || !d.url) return null;
-  return d as DevboxWithProvisionedSha;
-}
-
-async function persistProvisionedSha(
-  sessionId: string,
-  session: ManifexSession,
-  provisionedSha: string
-): Promise<void> {
-  const devbox = getDevbox(session);
-  if (!devbox) return;
-  const updatedManifest = {
-    ...session.manifest_state,
-    devbox: { ...devbox, last_provisioned_sha: provisionedSha },
-  } as unknown as ManifexSession['manifest_state'];
-  try {
-    await updateSession(sessionId, { manifest_state: updatedManifest });
-  } catch (e: any) {
-    console.warn(`[render] failed to persist provisioned sha: ${e?.message || e}`);
-  }
-}
-
-async function provisionAndRespond(
-  sessionId: string,
-  session: ManifexSession,
-  manifestSha: string,
-  project: CompiledProject,
-  sourceLabel: 'cache' | 'compile'
-) {
-  const devbox = getDevbox(session);
-  if (!devbox) {
-    // No devbox provisioned for this session yet — return the project
-    // without touching a machine. The session page's Build button kicks
-    // off devbox creation separately before reaching /render.
-    return NextResponse.json({
-      project,
-      manifest_sha: manifestSha,
-      source: sourceLabel,
-      devbox_provisioned: false,
-      detail: 'no devbox attached to session',
-    });
-  }
-
-  const skipSetup = devbox.last_provisioned_sha === manifestSha;
-  const provisionStarted = Date.now();
-  const provision = await Promise.race([
-    provisionDevboxProject(devbox.url, {
-      files: project.files,
-      setup: project.setup,
-      run: project.run,
-      port: project.port,
-    }, { skipSetup }),
-    new Promise<{ ok: false; stage: 'wait_port'; detail: string }>((resolve) =>
-      setTimeout(
-        () => resolve({ ok: false, stage: 'wait_port', detail: 'render route watchdog timeout' }),
-        MAX_PROVISION_WAIT_MS
-      )
-    ),
-  ]);
-  const provisionMs = Date.now() - provisionStarted;
-
-  const buildLogUrl = `${devbox.url.replace(/\/+$/, '')}/__logs`;
-
-  if (!provision.ok) {
-    console.warn(`[render] provision failed at ${provision.stage} after ${provisionMs}ms: ${provision.detail}`);
-    return NextResponse.json({
-      project,
-      manifest_sha: manifestSha,
-      source: sourceLabel,
-      devbox_provisioned: false,
-      provision: { ...provision, duration_ms: provisionMs },
-      build_log_url: buildLogUrl,
-      devbox_url: devbox.url,
-    }, { status: 502 });
-  }
-
-  // Record that this sha is live on the devbox so future renders can
-  // skip re-running setup.sh.
-  await persistProvisionedSha(sessionId, session, manifestSha);
-
-  console.log(`[render] provision OK in ${provisionMs}ms (setup_skipped=${skipSetup}, source=${sourceLabel}, port=${project.port})`);
-  return NextResponse.json({
-    project,
-    manifest_sha: manifestSha,
-    source: sourceLabel,
-    devbox_provisioned: true,
-    provision: { ...provision, duration_ms: provisionMs, setup_skipped: skipSetup },
-    build_log_url: buildLogUrl,
-    devbox_url: devbox.url,
-    // Legacy-compat field: the session UI gates the iframe render on a
-    // truthy `inlined_html` state value (see app/[id]/page.tsx:1532) even
-    // when the iframe ultimately points at the devbox URL rather than
-    // srcDoc-ing the HTML itself. Return a tiny non-null string so the
-    // existing gate flips without the UI needing a chunk-5 rewrite.
-    // Chunk 5 removes this reliance when it adds the build-log panel.
-    inlined_html: '<!-- manifex v7: preview rendered from devbox -->',
-  });
-}
+// Moving provisioning to the client means the manifex-wip Fly Machine
+// can go idle mid-build without dropping the /render request (which
+// previously capped at Fly's ~60s idle_timeout even though a cold
+// apt + npm install legitimately takes 200+ seconds).
 
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -138,9 +29,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   if (!session) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
   // Defensive guard: refuse to compile while a non-draft pending proposal
-  // is open. Otherwise the compile runs against the OLD manifest_state and
-  // the user's just-generated content gets bypassed silently. The UI
-  // gates Build too but this catches direct-API callers.
+  // is open. The UI gates Build too, but this catches direct-API callers.
   if (session.pending_attempt && !session.pending_attempt.draft) {
     return NextResponse.json({
       error: 'You have proposed changes waiting. Click "Looks good" to accept them before building.',
@@ -149,12 +38,13 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   }
 
   const manifestSha = session.manifest_state.sha;
+  const devbox = getDevbox(session);
 
   // ---- Cache path -------------------------------------------------------
   const cached = await getCachedProject(manifestSha, PROJECT_COMPILER_VERSION);
   if (cached) {
     console.log(`[render] v7 cache HIT for sha ${manifestSha.slice(0, 12)}`);
-    return provisionAndRespond(id, session, manifestSha, cached, 'cache');
+    return renderResponse(manifestSha, cached, devbox, 'cache');
   }
 
   // ---- Compile path -----------------------------------------------------
@@ -180,5 +70,49 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   }
 
   await putCachedProject(manifestSha, PROJECT_COMPILER_VERSION, compiled);
-  return provisionAndRespond(id, session, manifestSha, compiled, 'compile');
+  return renderResponse(manifestSha, compiled, devbox, 'compile');
+}
+
+interface DevboxAttached {
+  url: string;
+  app_name: string;
+  machine_id: string;
+  last_provisioned_sha?: string;
+}
+
+function getDevbox(session: ManifexSession): DevboxAttached | null {
+  const d = (session.manifest_state as any)?.devbox;
+  if (!d || !d.url) return null;
+  return d as DevboxAttached;
+}
+
+function renderResponse(
+  manifestSha: string,
+  project: CompiledProject,
+  devbox: DevboxAttached | null,
+  source: 'cache' | 'compile'
+) {
+  // Bundle setup.sh and run.sh into the files map so the client only
+  // has to POST a single JSON blob to /__files. The agent writes every
+  // key atomically; subsequent /__exec calls can bash these scripts in
+  // place without a second round-trip.
+  const files: Record<string, string> = {
+    ...project.files,
+    'setup.sh': project.setup,
+    'run.sh': project.run,
+  };
+
+  const skipSetup = devbox?.last_provisioned_sha === manifestSha;
+
+  return NextResponse.json({
+    manifest_sha: manifestSha,
+    source,
+    port: project.port,
+    files,
+    skip_setup: skipSetup,
+    devbox_url: devbox?.url ?? null,
+    build_log_url: devbox ? `${devbox.url.replace(/\/+$/, '')}/__logs` : null,
+    health_url: devbox ? `${devbox.url.replace(/\/+$/, '')}/__health` : null,
+    events_url: devbox ? `${devbox.url.replace(/\/+$/, '')}/__events` : null,
+  });
 }
