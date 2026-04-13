@@ -169,7 +169,13 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [conversationOpen, setConversationOpen] = useState(false);
   const [conversation, setConversation] = useState<ConversationMessage[]>([]);
   const [pendingFile, setPendingFile] = useState<{ type: 'image' | 'text' | 'pdf'; base64?: string; mediaType?: string; textContent?: string; fileName: string; previewUrl?: string } | null>(null);
-  const [validateResult, setValidateResult] = useState<{ total: number; passed: number; results: { name: string; passed: boolean; error?: string }[] } | null>(null);
+  const [validateResult, setValidateResult] = useState<{
+    total: number;
+    passed: number;
+    structural?: number;
+    behavior?: number;
+    results: { name: string; passed: boolean; error?: string; category?: 'structural' | 'behavior'; durationMs?: number }[];
+  } | null>(null);
   const [validating, setValidating] = useState(false);
   const [editMode, setEditMode] = useState(false);
   const [editCard, setEditCard] = useState<{ x: number; y: number; page: string; section: string; elementText: string; elementTag: string } | null>(null);
@@ -277,16 +283,17 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   // Preview ↔ Docs bridge: listen for click-to-identify from iframe
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
-  const runValidate = () => {
+  const runValidate = async () => {
     const iframe = iframeRef.current;
-    const win = iframe?.contentWindow as (Window & { __manifexRunTests?: () => any }) | null | undefined;
+    const win = iframe?.contentWindow as (Window & { __manifexRunTests?: () => any | Promise<any> }) | null | undefined;
     if (!win || typeof win.__manifexRunTests !== 'function') {
       setValidateResult({ total: 0, passed: 0, results: [{ name: 'No tests available', passed: false, error: 'The compiled app has no tests. Add a Tests page to your docs and rebuild.' }] });
       return;
     }
     setValidating(true);
     try {
-      const r = win.__manifexRunTests();
+      // Runner is async — behavior tests await sleeps, DOM updates, etc.
+      const r = await Promise.resolve(win.__manifexRunTests());
       setValidateResult(r);
     } catch (e: any) {
       setValidateResult({ total: 0, passed: 0, results: [{ name: 'Test runner crashed', passed: false, error: e?.message || String(e) }] });
@@ -1283,23 +1290,54 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                       color: 'var(--text, #111)',
                     }}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                      <strong>{validateResult.passed}/{validateResult.total} passed</strong>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px', gap: '8px' }}>
+                      <div>
+                        <strong>{validateResult.passed}/{validateResult.total} passed</strong>
+                        {(validateResult.behavior !== undefined || validateResult.structural !== undefined) && (
+                          <div style={{ fontSize: '10px', color: 'var(--text-dim, #888)', marginTop: '2px' }}>
+                            {validateResult.behavior ?? 0} behavior · {validateResult.structural ?? 0} structural
+                          </div>
+                        )}
+                      </div>
                       <button onClick={() => setValidateResult(null)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '14px', color: 'var(--text-dim, #888)' }}>×</button>
                     </div>
                     {validateResult.results.length === 0 ? (
                       <p style={{ margin: 0, color: 'var(--text-dim, #888)' }}>No tests defined.</p>
                     ) : (
                       <ul style={{ listStyle: 'none', padding: 0, margin: 0, display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                        {validateResult.results.map((r, i) => (
+                        {validateResult.results.map((r, i) => {
+                          const isBehavior = r.category === 'behavior';
+                          return (
                           <li key={i} style={{ display: 'flex', gap: '6px', alignItems: 'flex-start' }}>
                             <span style={{ color: r.passed ? '#16a34a' : '#dc2626', fontWeight: 600, flexShrink: 0 }}>{r.passed ? '✓' : '✗'}</span>
-                            <div style={{ minWidth: 0 }}>
-                              <div style={{ wordBreak: 'break-word' }}>{r.name}</div>
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <div style={{ wordBreak: 'break-word', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                <span>{r.name}</span>
+                                <span
+                                  title={isBehavior ? 'Behavior test — drives the UI and asserts on real outcomes' : 'Structural test — checks that the right elements rendered'}
+                                  style={{
+                                    fontSize: '9px',
+                                    padding: '1px 6px',
+                                    borderRadius: '999px',
+                                    background: isBehavior ? '#dbeafe' : '#f1f5f9',
+                                    color: isBehavior ? '#1e40af' : '#64748b',
+                                    fontWeight: 600,
+                                    textTransform: 'uppercase',
+                                    letterSpacing: '0.04em',
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {isBehavior ? 'behavior' : 'structural'}
+                                </span>
+                                {r.durationMs !== undefined && r.durationMs > 50 && (
+                                  <span style={{ fontSize: '10px', color: 'var(--text-dim, #888)' }}>{r.durationMs}ms</span>
+                                )}
+                              </div>
                               {r.error && <div style={{ color: '#dc2626', fontSize: '11px', marginTop: '2px', wordBreak: 'break-word' }}>{r.error}</div>}
                             </div>
                           </li>
-                        ))}
+                          );
+                        })}
                       </ul>
                     )}
                   </div>

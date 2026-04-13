@@ -7,7 +7,7 @@ import { renderDiagramMarkers } from './diagram';
 import type { CodexFiles, CompiledCodex, ManifestState, DocPage, TreeNode, Question, ConversationMessage } from './types';
 import { serializePages } from './types';
 
-const COMPILER_VERSION = 'manifex-claude-sonnet-4-v3';
+const COMPILER_VERSION = 'manifex-claude-sonnet-4-v4-behavior-tests';
 const MODEL = 'claude-sonnet-4-5-20250929';
 
 let _client: Anthropic | null = null;
@@ -522,7 +522,71 @@ CODE RULES:
 - app.js: clean, well-organized JavaScript
 - Be deterministic: identical input should produce equivalent output
 - Annotate major HTML elements with data-doc-page and data-doc-section attributes mapping to the documentation page describing them. Use lowercase hyphenated slugs.
-- If a Tests documentation page exists, also generate tests_js: executable tests that validate the compiled app matches the docs. Format MUST be: declare window.__manifexTests as an array of { name: string, fn: () => void } objects. Each fn throws on failure. Provide a top-level helper "function assert(c, m) { if (!c) throw new Error(m); }" then push tests like: window.__manifexTests = [{ name: 'home button visible', fn: () => assert(document.querySelector('[data-doc-page=overview]'), 'overview missing') }, ...]. Tests should cover key DOM structure, content text, and visual presence claims from the Tests page. Do NOT use top-level await or DOM-not-ready code — assume document is fully loaded when tests run.${secretsSection}`;
+- If a Tests documentation page exists, generate a tests_js file with REAL behavior tests, not just structural element-existence checks. Both kinds matter:
+
+  STRUCTURAL TESTS (still useful — verify the UI actually rendered):
+  - element exists, button visible, color is right, text content present.
+  - Cheap, fast, catch the LLM forgetting to render something.
+
+  BEHAVIOR TESTS (the important ones — verify the app actually WORKS):
+  - Time-based features: measure Date.now() before and after a brief
+    real wait. Assert the displayed time changed by the right amount.
+  - CRUD: drive the UI to add an item, assert it appears in the list,
+    edit it, assert the change persists, delete it, assert it's gone.
+  - Stats / aggregates: seed data via the real form flow, click compute,
+    read the displayed value, assert against the expected value.
+  - Navigation: click a nav element, assert the right view is shown
+    (visible/hidden, hash changed, etc.).
+  - Validation: submit a form with invalid input, assert an error appears.
+
+  FORMAT (mandatory):
+  Declare window.__manifexTests as an array of objects:
+    { name: string, category: 'structural' | 'behavior', fn: () => void | Promise<void> }
+  Each fn throws on failure. fn may be async — the runner awaits it.
+  Provide a top-level helper:
+    function assert(c, m) { if (!c) throw new Error(m); }
+  The runner exposes these helpers on window for you to use directly:
+    window.__manifexSleep(ms)              // await a real wait
+    window.__manifexQuery(sel)             // querySelector shorthand
+    window.__manifexQueryAll(sel)          // querySelectorAll → array
+    window.__manifexClick(selOrEl)         // click and dispatch
+    window.__manifexType(selOrEl, value)   // set input value + fire input/change
+
+  EXAMPLE for a Pomodoro timer (covers the timer-accuracy failure mode):
+    window.__manifexTests = [
+      { name: 'start button visible', category: 'structural', fn: () => assert(document.querySelector('[data-action=start]'), 'no start button') },
+      { name: 'timer counts down at real time', category: 'behavior', fn: async () => {
+          document.querySelector('[data-action=start]').click();
+          var displayBefore = document.querySelector('[data-role=time-display]').textContent;
+          var msBefore = parseDisplay(displayBefore); // helper you also define
+          await window.__manifexSleep(2000);
+          var msAfter = parseDisplay(document.querySelector('[data-role=time-display]').textContent);
+          var elapsed = msBefore - msAfter;
+          assert(elapsed > 1500 && elapsed < 2500, 'timer drifted: expected ~2000ms in 2s, got ' + elapsed + 'ms');
+      }},
+    ];
+
+  EXAMPLE for a CRUD list:
+    { name: 'add then delete entry', category: 'behavior', fn: async () => {
+        window.__manifexType('[data-field=title]', 'Test entry');
+        window.__manifexClick('[data-action=add]');
+        await window.__manifexSleep(50);
+        var rows = window.__manifexQueryAll('[data-row]');
+        assert(rows.some(r => r.textContent.includes('Test entry')), 'entry did not appear');
+        window.__manifexClick('[data-row]:last-child [data-action=delete]');
+        await window.__manifexSleep(50);
+        assert(!window.__manifexQueryAll('[data-row]').some(r => r.textContent.includes('Test entry')), 'entry did not delete');
+    }}
+
+  Annotate every interactive element in your generated app with stable
+  data-action / data-role / data-field attributes so the tests can
+  target them reliably without relying on visible text. The same
+  data-doc-page attributes you already emit for visual edit work.
+
+  Aim for 60-80% of tests in the behavior category for any app with
+  real interactions. Pure-static apps (a marketing landing page) can
+  be mostly structural. Do NOT use top-level await or DOM-not-ready
+  code — assume document is fully loaded when tests run.${secretsSection}`;
 }
 
 export async function compileManifestToCodex(

@@ -102,7 +102,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
-  const COMPILER_VERSION = 'manifex-claude-sonnet-4-v3';
+  const COMPILER_VERSION = 'manifex-claude-sonnet-4-v4-behavior-tests';
   const manifestSha = session.manifest_state.sha;
 
   // Check exact cache first

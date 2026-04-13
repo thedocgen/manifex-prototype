@@ -9,15 +9,48 @@ import type { CodexFiles } from './types';
  */
 const TEST_RUNNER_SCRIPT = `
 (function(){
-  window.__manifexRunTests = function(){
+  // Helpers exposed on window so test functions can use them without
+  // redefining inside every test file.
+  window.__manifexSleep = function(ms){ return new Promise(function(r){ setTimeout(r, ms); }); };
+  window.__manifexQuery = function(sel){ return document.querySelector(sel); };
+  window.__manifexQueryAll = function(sel){ return Array.from(document.querySelectorAll(sel)); };
+  window.__manifexClick = function(sel){
+    var el = typeof sel === 'string' ? document.querySelector(sel) : sel;
+    if (!el) throw new Error('click target not found: ' + sel);
+    el.click();
+  };
+  window.__manifexType = function(sel, value){
+    var el = typeof sel === 'string' ? document.querySelector(sel) : sel;
+    if (!el) throw new Error('input not found: ' + sel);
+    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value') ||
+                 Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value');
+    if (setter && setter.set) setter.set.call(el, value); else el.value = value;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  };
+
+  window.__manifexRunTests = async function(){
     var tests = window.__manifexTests || [];
     var results = [];
     for (var i = 0; i < tests.length; i++) {
       var t = tests[i];
-      try { t.fn(); results.push({ name: t.name, passed: true }); }
-      catch (e) { results.push({ name: t.name, passed: false, error: (e && e.message) || String(e) }); }
+      var category = t.category || 'structural';
+      var startedAt = Date.now();
+      try {
+        // fn may return a Promise — await it. Handles both sync and async tests.
+        await Promise.resolve(t.fn());
+        results.push({ name: t.name, category: category, passed: true, durationMs: Date.now() - startedAt });
+      } catch (e) {
+        results.push({ name: t.name, category: category, passed: false, error: (e && e.message) || String(e), durationMs: Date.now() - startedAt });
+      }
     }
-    return { total: results.length, passed: results.filter(function(r){return r.passed;}).length, results: results };
+    return {
+      total: results.length,
+      passed: results.filter(function(r){return r.passed;}).length,
+      structural: results.filter(function(r){return r.category === 'structural';}).length,
+      behavior: results.filter(function(r){return r.category === 'behavior';}).length,
+      results: results,
+    };
   };
 })();`;
 
