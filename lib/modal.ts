@@ -505,6 +505,13 @@ CONTENT QUALITY:
 - Use realistic sample data (names, dates, descriptions that fit the domain)
 - NEVER use emojis in generated output. Use SVG icons, simple Unicode symbols (arrows, bullets, dashes), or text labels instead. The output must be professional.
 
+TIME-BASED FEATURES (timers, countdowns, stopwatches, polling, animations):
+- Per-second ticks MUST use setInterval(fn, 1000). Do NOT use sub-second intervals (100ms, 250ms, etc.) and decrement by 1 second per tick — that produces a timer that runs many times faster than real time. This is a recurring failure mode; do not repeat it.
+- Drift-free timing: store a Date.now() baseline when the timer starts and compute remaining = totalMs - (Date.now() - startMs) on each tick. Pause/resume should adjust the baseline, not accumulate sub-tick drift.
+- Stopping a timer: always clearInterval(id). Set the id back to null so subsequent starts don't leak intervals.
+- Visibility: when document.hidden becomes true, setInterval throttles to ~1Hz minimum in most browsers — the Date.now() baseline approach above is robust to this. Do not assume tick count equals elapsed seconds.
+- Sub-second updates are only correct if the spec explicitly asks for them (e.g. "milliseconds-precision stopwatch") AND the displayed value is computed from Date.now(), not decremented per tick.
+
 CODE RULES:
 - Read ALL documentation pages to understand the full app spec
 - Technical pages (Architecture, Data Model) define HOW to build. Follow their decisions.
