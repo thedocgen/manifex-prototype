@@ -31,8 +31,20 @@ function escapeHtml(text: string): string {
 }
 
 function renderDocument(title: string, pages: Array<{ path: string; title: string; content: string }>, autoPrint: boolean): string {
+  // TOC precedes all content sections and is itself a section so print
+  // page-break rules apply uniformly. Skipped when there's only one page —
+  // a single-entry TOC is noise, not navigation.
+  const toc = pages.length > 1 ? `
+    <section class="mx-page mx-page-first mx-toc" data-path="__toc">
+      <h1 class="mx-page-title">Contents</h1>
+      <ol class="mx-toc-list">
+${pages.map(p => `        <li><a href="#pg-${escapeHtml(p.path)}">${escapeHtml(p.title)}</a></li>`).join('\n')}
+      </ol>
+    </section>
+  ` : '';
+
   const sections = pages.map((p, i) => `
-    <section class="mx-page${i === 0 ? ' mx-page-first' : ''}" data-path="${escapeHtml(p.path)}">
+    <section class="mx-page${toc === '' && i === 0 ? ' mx-page-first' : ''}" id="pg-${escapeHtml(p.path)}" data-path="${escapeHtml(p.path)}">
       <h1 class="mx-page-title">${escapeHtml(p.title)}</h1>
       <div class="mx-md">
 ${markdownToHtml(p.content)}
@@ -131,6 +143,10 @@ ${markdownToHtml(p.content)}
       margin: 0.6em 0;
     }
     .mx-md-pre code { background: transparent; padding: 0; font-size: inherit; }
+    .mx-toc-list { list-style: decimal; margin: 0.5em 0 0 1.5em; padding: 0; font-size: 12pt; }
+    .mx-toc-list li { margin: 0.3em 0; }
+    .mx-toc-list a { color: var(--mx-ink); text-decoration: none; }
+    .mx-toc-list a:hover { color: var(--mx-accent); text-decoration: underline; }
 
     @media print {
       @page { size: letter; margin: 0.75in; }
@@ -173,6 +189,7 @@ ${markdownToHtml(p.content)}
     <button type="button" onclick="window.print()">Print / Save as PDF</button>
   </div>
   <main class="mx-doc">
+${toc}
 ${sections}
   </main>
   ${script}
