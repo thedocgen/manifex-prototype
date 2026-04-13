@@ -52,6 +52,12 @@ export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
   questions?: Question[];
+  /**
+   * For user messages that answered a previous question turn, this maps
+   * each question id from the previous assistant turn to the user's answer.
+   * Used to render retired question groups with per-question pairing.
+   */
+  answers?: Record<string, string>;
   diff_summary?: string;
   changed_pages?: string[];
   imageUrl?: string;         // thumbnail URL for image-based prompts

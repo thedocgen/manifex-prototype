@@ -180,6 +180,10 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [editCard, setEditCard] = useState<{ x: number; y: number; page: string; section: string; elementText: string; elementTag: string } | null>(null);
   const [editCardText, setEditCardText] = useState('');
   const [presencePeers, setPresencePeers] = useState<{ user_id: string; display_name: string | null; page_path: string | null }[]>([]);
+  // Per-question answers for the active planning question group. Keyed by
+  // questionId. Cleared after a successful combined-submit. Choice clicks
+  // select; text/secret inputs are controlled by this same map.
+  const [activeAnswers, setActiveAnswers] = useState<Record<string, string>>({});
 
   // Track whether conversation was loaded from server (skip persisting on restore)
   const convoLoadedRef = useRef(false);
@@ -338,6 +342,27 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     if (!editMode) setEditCard(null);
   }, [editMode, previewHtml]);
 
+  // Submit a planning question group as one combined user turn. Composes
+  // the answers into a structured message the LLM can parse, attaches the
+  // raw {questionId → answer} map to the resulting user message so the
+  // retired-question UI can pair per-question, and clears the active
+  // answer state.
+  const submitQuestionAnswers = (questions: { id: string; text: string }[]) => {
+    if (busy) return;
+    const answers: Record<string, string> = {};
+    const lines: string[] = [];
+    for (const q of questions) {
+      const a = (activeAnswers[q.id] || '').trim();
+      if (!a) continue;
+      answers[q.id] = a;
+      lines.push(`Q: ${q.text} → ${a}`);
+    }
+    if (lines.length === 0) return;
+    const combined = lines.join('\n');
+    setActiveAnswers({});
+    submitPrompt(combined, { answers });
+  };
+
   const submitVisualEdit = () => {
     if (!editCard || !editCardText.trim()) return;
     const sectionLabel = editCard.section ? editCard.section.replace(/-/g, ' ') : '';
@@ -419,7 +444,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     }
   };
 
-  const submitPrompt = async (overridePrompt?: string | any) => {
+  const submitPrompt = async (overridePrompt?: string | any, opts: { answers?: Record<string, string> } = {}) => {
     const promptText = (typeof overridePrompt === 'string') ? overridePrompt : prompt;
     if (!promptText.trim() && !pendingFile) return;
     let p = promptText;
@@ -436,6 +461,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       role: 'user',
       content: p || (pendingFile ? `(${pendingFile.fileName})` : ''),
       imageUrl: pendingFile?.type === 'image' ? pendingFile.previewUrl : undefined,
+      answers: opts.answers,
       timestamp: new Date().toISOString(),
     };
     setPendingFile(null);
@@ -1331,7 +1357,11 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                 </div>
 
                 {/* Render structured questions */}
-                {msg.questions && msg.questions.length > 0 && (
+                {msg.questions && msg.questions.length > 0 && (() => {
+                  const qs = msg.questions;
+                  const nextUserMsg = conversation[i + 1]?.role === 'user' ? conversation[i + 1] : null;
+                  const filledCount = qs.filter(q => (activeAnswers[q.id] || '').trim().length > 0).length;
+                  return (
                   <div style={{
                     background: 'rgba(0,0,0,0.03)',
                     border: '1px solid var(--border)',
@@ -1340,79 +1370,109 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                     maxWidth: '80%',
                     display: 'flex',
                     flexDirection: 'column',
-                    gap: '8px',
+                    gap: '10px',
                     opacity: isActiveQuestionMsg ? 1 : 0.55,
                   }}>
-                    {msg.questions.map(q => (
+                    {qs.map(q => {
+                      // Per-question retired answer (P1 #20): if the user message
+                      // immediately after this turn carries a per-question answer
+                      // map, pull this question's answer from there. Falls back to
+                      // the legacy "whole user message" path for older sessions.
+                      const retiredAnswer = nextUserMsg?.answers?.[q.id]
+                        ?? (qs.length === 1 ? nextUserMsg?.content ?? null : null);
+                      const currentValue = activeAnswers[q.id] || '';
+                      return (
                       <div key={q.id}>
                         <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text)', marginBottom: '4px' }}>
                           {q.text}
                         </div>
                         {!isActiveQuestionMsg ? (
                           <div style={{ fontSize: '12px', color: 'var(--text-dim)', fontStyle: 'italic', padding: '4px 0' }}>
-                            {answer ? `You answered: ${answer}` : 'Answered'}
+                            {retiredAnswer ? `You answered: ${retiredAnswer}` : 'Skipped'}
                           </div>
                         ) : q.type === 'choice' && q.options ? (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                            {q.options.map(opt => (
-                              <button
-                                key={opt}
-                                onClick={() => submitPrompt(opt)}
-                                disabled={busy}
-                                data-testid="question-choice-btn"
-                                style={{
-                                  background: 'var(--bg-elev)',
-                                  border: '1px solid var(--border)',
-                                  borderRadius: '8px',
-                                  padding: '6px 12px',
-                                  fontSize: '12px',
-                                  color: 'var(--text)',
-                                  cursor: 'pointer',
-                                  textAlign: 'left',
-                                }}
-                              >
-                                {opt}
-                              </button>
-                            ))}
+                            {q.options.map(opt => {
+                              const selected = currentValue === opt;
+                              return (
+                                <button
+                                  key={opt}
+                                  onClick={() => setActiveAnswers(prev => ({ ...prev, [q.id]: opt }))}
+                                  disabled={busy}
+                                  data-testid="question-choice-btn"
+                                  data-selected={selected ? 'true' : 'false'}
+                                  style={{
+                                    background: selected ? 'var(--accent-soft)' : 'var(--bg-elev)',
+                                    border: selected ? '1.5px solid var(--accent)' : '1px solid var(--border)',
+                                    borderRadius: '8px',
+                                    padding: '6px 12px',
+                                    fontSize: '12px',
+                                    color: selected ? 'var(--accent)' : 'var(--text)',
+                                    fontWeight: selected ? 600 : 400,
+                                    cursor: 'pointer',
+                                    textAlign: 'left',
+                                  }}
+                                >
+                                  <span style={{ marginRight: '6px' }}>{selected ? '●' : '○'}</span>
+                                  {opt}
+                                </button>
+                              );
+                            })}
                           </div>
-                        ) : isActiveQuestionMsg && q.type === 'text' ? (
-                          <input
+                        ) : q.type === 'text' ? (
+                          <textarea
+                            value={currentValue}
+                            onChange={e => setActiveAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
                             placeholder="Type your answer…"
-                            onKeyDown={e => {
-                              if (e.key === 'Enter') {
-                                setPrompt((e.target as HTMLInputElement).value);
-                                (e.target as HTMLInputElement).value = '';
-                              }
+                            rows={2}
+                            data-testid="question-text-input"
+                            disabled={busy}
+                            style={{
+                              width: '100%',
+                              padding: '6px 10px',
+                              fontSize: '12px',
+                              borderRadius: '6px',
+                              border: '1px solid var(--border)',
+                              background: 'var(--bg-elev)',
+                              color: 'var(--text)',
+                              resize: 'vertical',
+                              fontFamily: 'inherit',
+                              boxSizing: 'border-box',
                             }}
-                            style={{ width: '100%', padding: '6px 10px', fontSize: '12px', borderRadius: '6px' }}
                           />
-                        ) : isActiveQuestionMsg && q.type === 'secret' ? (
-                          <div style={{ display: 'flex', gap: '6px' }}>
-                            <input
-                              type="password"
-                              placeholder="Paste securely…"
-                              data-secret-key={q.id}
-                              style={{ flex: 1, padding: '6px 10px', fontSize: '12px', borderRadius: '6px' }}
-                            />
-                            <button
-                              onClick={() => {
-                                const input = document.querySelector(`[data-secret-key="${q.id}"]`) as HTMLInputElement;
-                                if (input?.value) {
-                                  submitSecretAnswer(q.id, q.id, input.value);
-                                  input.value = '';
-                                }
-                              }}
-                              className="mx-btn mx-btn-primary"
-                              style={{ padding: '4px 10px', fontSize: '11px' }}
-                            >
-                              Save
-                            </button>
-                          </div>
+                        ) : q.type === 'secret' ? (
+                          <input
+                            type="password"
+                            value={currentValue}
+                            onChange={e => setActiveAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
+                            placeholder="Paste securely…"
+                            data-testid="question-secret-input"
+                            disabled={busy}
+                            style={{ width: '100%', padding: '6px 10px', fontSize: '12px', borderRadius: '6px', border: '1px solid var(--border)' }}
+                          />
                         ) : null}
                       </div>
-                    ))}
+                      );
+                    })}
+                    {isActiveQuestionMsg && (
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: '8px', marginTop: '2px' }}>
+                        <span style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
+                          {filledCount} of {qs.length} answered
+                        </span>
+                        <button
+                          onClick={() => submitQuestionAnswers(qs)}
+                          disabled={busy || filledCount === 0}
+                          data-testid="submit-answers-btn"
+                          className="mx-btn mx-btn-primary"
+                          style={{ fontSize: '12px', padding: '6px 14px' }}
+                        >
+                          Submit answers
+                        </button>
+                      </div>
+                    )}
                   </div>
-                )}
+                  );
+                })()}
               </div>
               );
             })}
