@@ -1,10 +1,10 @@
 {
-  "name": "manifex-devbox",
-  "version": "0.1.0",
+  "name": "manifex-devbox-agent",
+  "version": "0.2.0",
   "private": true,
-  "description": "Per-session HTTP server that serves the compiled Manifex app + reloads on /__sync.",
-  "main": "server.js",
+  "description": "Phase 2B agent: blank-Ubuntu devbox host. Manages workspace files, runs LLM-emitted setup/run scripts, proxies to the dev server.",
+  "main": "agent/server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node agent/server.js"
   }
 }
