@@ -369,9 +369,15 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       const data = await res.json();
       // Stop the progressive status timers as soon as we have a response —
       // otherwise a delayed 'Still working…' tick can fire after the UI has
-      // already moved on, which leaves the status bar lying.
+      // already moved on, which leaves the status bar lying. We also flip
+      // status to idle here as belt-and-braces; the finally below is the
+      // canonical clear, but doing it now means the status indicator
+      // disappears the instant the response lands instead of after React
+      // batches in the next branch's state work.
       progressTimers.forEach(clearTimeout);
       progressTimers.length = 0;
+      setStatus('idle');
+      setStatusMsg('');
 
       if (!res.ok) {
         const errMsg: ConversationMessage = {
