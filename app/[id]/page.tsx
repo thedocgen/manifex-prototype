@@ -367,6 +367,11 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         }),
       });
       const data = await res.json();
+      // Stop the progressive status timers as soon as we have a response —
+      // otherwise a delayed 'Still working…' tick can fire after the UI has
+      // already moved on, which leaves the status bar lying.
+      progressTimers.forEach(clearTimeout);
+      progressTimers.length = 0;
 
       if (!res.ok) {
         const errMsg: ConversationMessage = {
@@ -1097,7 +1102,15 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             flexDirection: 'column',
             gap: '8px',
           }}>
-            {conversation.map((msg, i) => (
+            {conversation.map((msg, i) => {
+              // Only the LAST assistant message that carries questions is interactive.
+              // Earlier question sets are answered history — render their buttons inert
+              // so the user can't re-click them and so they don't share the global busy state.
+              const lastQIdx = conversation.reduce((acc, m, j) => (m.role === 'assistant' && m.questions && m.questions.length > 0 ? j : acc), -1);
+              const isActiveQuestionMsg = i === lastQIdx;
+              // The next user message after this question set is the answer the user picked.
+              const answer = msg.questions && msg.questions.length > 0 && conversation[i + 1]?.role === 'user' ? conversation[i + 1].content : null;
+              return (
               <div key={i} style={{
                 display: 'flex',
                 flexDirection: 'column',
@@ -1149,19 +1162,25 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                     display: 'flex',
                     flexDirection: 'column',
                     gap: '8px',
+                    opacity: isActiveQuestionMsg ? 1 : 0.55,
                   }}>
                     {msg.questions.map(q => (
                       <div key={q.id}>
                         <div style={{ fontSize: '12px', fontWeight: 500, color: 'var(--text)', marginBottom: '4px' }}>
                           {q.text}
                         </div>
-                        {q.type === 'choice' && q.options && (
+                        {!isActiveQuestionMsg ? (
+                          <div style={{ fontSize: '12px', color: 'var(--text-dim)', fontStyle: 'italic', padding: '4px 0' }}>
+                            {answer ? `You answered: ${answer}` : 'Answered'}
+                          </div>
+                        ) : q.type === 'choice' && q.options ? (
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                             {q.options.map(opt => (
                               <button
                                 key={opt}
                                 onClick={() => submitPrompt(opt)}
                                 disabled={busy}
+                                data-testid="question-choice-btn"
                                 style={{
                                   background: 'var(--bg-elev)',
                                   border: '1px solid var(--border)',
@@ -1177,8 +1196,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                               </button>
                             ))}
                           </div>
-                        )}
-                        {q.type === 'text' && (
+                        ) : isActiveQuestionMsg && q.type === 'text' ? (
                           <input
                             placeholder="Type your answer…"
                             onKeyDown={e => {
@@ -1189,8 +1207,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                             }}
                             style={{ width: '100%', padding: '6px 10px', fontSize: '12px', borderRadius: '6px' }}
                           />
-                        )}
-                        {q.type === 'secret' && (
+                        ) : isActiveQuestionMsg && q.type === 'secret' ? (
                           <div style={{ display: 'flex', gap: '6px' }}>
                             <input
                               type="password"
@@ -1212,13 +1229,14 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                               Save
                             </button>
                           </div>
-                        )}
+                        ) : null}
                       </div>
                     ))}
                   </div>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
