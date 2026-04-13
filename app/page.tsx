@@ -38,32 +38,11 @@ export default function HomePage() {
     if (data.session) router.push(`/${data.session.id}`);
   };
 
-  // Start brainstorming: create project + session, send prompt, navigate to editor
+  // Start brainstorming: create project + session, redirect with prompt in query
+  // (the editor reads ?p= and submits it on mount — no need to wait for the LLM here)
   const startBrainstorm = async () => {
-    setCreating(true);
-    try {
-      const res = await fetch('/api/manifex/projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: 'New project' }),
-      });
-      const data = await res.json();
-      if (data.project) {
-        const sessRes = await fetch(`/api/manifex/projects/${data.project.id}/sessions`, { method: 'POST' });
-        const sessData = await sessRes.json();
-        if (sessData.session) {
-          const brainstormPrompt = "I have a rough idea but I'm not sure how to shape it yet. Can you help me think through it?";
-          await fetch(`/api/manifex/sessions/${sessData.session.id}/prompt`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ prompt: brainstormPrompt }),
-          });
-          router.push(`/${sessData.session.id}`);
-        }
-      }
-    } finally {
-      setCreating(false);
-    }
+    const brainstormPrompt = "I have a rough idea but I'm not sure how to shape it yet. Can you help me think through it?";
+    await createFromPrompt(brainstormPrompt);
   };
 
   const createFromPrompt = async (buildPrompt: string) => {
