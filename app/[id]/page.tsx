@@ -418,12 +418,13 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       progressTimers.push(setTimeout(() => setStatusMsg('Planning documentation structure…'), 8000));
       progressTimers.push(setTimeout(() => setStatusMsg('Generating architecture diagrams…'), 25000));
       progressTimers.push(setTimeout(() => setStatusMsg('Writing specifications…'), 50000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Finalizing your documentation…'), 80000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Taking a bit longer than usual…'), 120000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Polishing the details…'), 80000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Almost ready — finalizing the documentation…'), 120000));
     } else {
       setStatusMsg('Thinking about your change…');
       progressTimers.push(setTimeout(() => setStatusMsg('Updating the relevant pages…'), 15000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Still working…'), 45000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Reviewing the changes…'), 45000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Almost ready — finalizing the edit…'), 80000));
     }
     try {
       const res = await fetch(`/api/manifex/sessions/${id}/prompt`, {
