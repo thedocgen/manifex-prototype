@@ -901,14 +901,23 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     !!currentState.pages['overview'] &&
     currentState.pages['overview'].content.includes('Describe your app idea below');
 
+  // Meta-page paths (synthetic pages that aren't in manifest_state.pages but
+  // appear in the sidebar tree). Declared here so the activePage validity
+  // guard below can recognize them — without this, clicking a meta entry
+  // bounces effectiveActivePage back to the first real page and the main
+  // panel keeps rendering whatever was there before.
+  const HISTORY_PATH = '_build-history';
+  const META_PAGE_PATHS = new Set([HISTORY_PATH]);
+
   // Ensure activePage is valid
-  const effectiveActivePage = currentState.pages[activePage] ? activePage : (currentState.tree[0]?.path || Object.keys(currentState.pages)[0] || '');
+  const effectiveActivePage = (currentState.pages[activePage] || META_PAGE_PATHS.has(activePage))
+    ? activePage
+    : (currentState.tree[0]?.path || Object.keys(currentState.pages)[0] || '');
 
   const basePageContent = baseState?.pages[effectiveActivePage]?.content || null;
   const diffAgainst = (baseState && changedPaths.has(effectiveActivePage)) ? basePageContent : null;
 
   // ── Build History page (auto-generated from conversation) ──
-  const HISTORY_PATH = '_build-history';
   const historyEntries = conversation.filter(m => m.role === 'user' || (m.role === 'assistant' && m.diff_summary));
   let historyContent = '# Build History\n\nHow this app came to be.\n';
   let entryNum = 0;
