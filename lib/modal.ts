@@ -137,6 +137,15 @@ When generating docs (after planning confirmation, or for follow-up prompts on a
 
 Additional domain-specific pages as needed (e.g. "User Accounts", "Notifications", "Search and Filters").
 
+ASCII DIAGRAM RULES (apply to every diagram on every page):
+- Every diagram MUST be wrapped in a fenced \`\`\`text or \`\`\` code block so the markdown renderer treats it as preformatted text. Otherwise the alignment collapses.
+- Use box-drawing characters (┌ ┐ └ ┘ │ ─ ├ ┤ ┬ ┴ ┼) consistently within a single diagram. Don't mix box characters with ASCII pipes (|) and dashes (-) in the same drawing.
+- Arrows: use ──> ──► ◄── for horizontal flow, │ ▼ ▲ for vertical. Keep arrowheads on a single line.
+- Pad columns so vertical lines actually line up — count characters, don't eyeball it.
+- Keep diagrams under 80 columns wide so they fit in the docs panel without horizontal scroll.
+- One diagram per concept. Do NOT cram an architecture diagram, data model, and user journey into one figure.
+- If a relationship is too complex for ASCII, write it out in numbered prose instead of producing a broken diagram.
+
 WRITING STANDARDS — concrete, specific, no corporate slop:
 Write like a thoughtful engineer explaining the app to another engineer. No marketing language. No hedging. Describe what the app *does*, not what it *enables*.
 
