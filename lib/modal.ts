@@ -286,11 +286,12 @@ export async function editManifest(
 
   userText += `USER REQUEST: ${prompt || '(see attached image)'}`;
 
-  // Build message content — multimodal if image provided
+  // Build message content — multimodal if image or PDF provided
   const messageContent: any[] = [];
   if (options.image) {
+    const isPdf = options.image.media_type === 'application/pdf';
     messageContent.push({
-      type: 'image',
+      type: isPdf ? 'document' : 'image',
       source: { type: 'base64', media_type: options.image.media_type, data: options.image.base64 },
     });
   }
