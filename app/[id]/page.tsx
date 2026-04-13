@@ -428,7 +428,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     setCompiling(true);
     setPreviewError(null);
     try {
-      try { new BroadcastChannel('manifex-preview').postMessage({ type: 'compiling' }); } catch {}
+      try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'compiling' }); } catch {}
       const res = await fetch(`/api/manifex/sessions/${id}/render`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -437,7 +437,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       }
       if (data.inlined_html) {
         setPreviewHtml(data.inlined_html);
-        try { new BroadcastChannel('manifex-preview').postMessage({ type: 'update', html: data.inlined_html }); } catch {}
+        try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'update', html: data.inlined_html }); } catch {}
       }
     } catch {
       setPreviewError('Couldn\'t connect to the build service. Try again in a moment.');
@@ -1187,9 +1187,11 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                 onClick={() => {
                   const w = window.open('', '_blank');
                   if (w) {
-                    // Write initial HTML + BroadcastChannel listener for live updates
+                    // Write initial HTML + BroadcastChannel listener for live updates.
+                    // Channel name is scoped per-session so each breakout tab only receives
+                    // updates for its own session — stops cross-session contamination.
                     const listenerScript = `<script>
-                      const ch = new BroadcastChannel('manifex-preview');
+                      const ch = new BroadcastChannel("manifex-preview-${id}");
                       ch.onmessage = e => {
                         if (e.data.type === 'update' && e.data.html) {
                           document.open();
