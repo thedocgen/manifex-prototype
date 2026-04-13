@@ -1455,19 +1455,31 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                       );
                     })}
                     {isActiveQuestionMsg && (
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: '8px', marginTop: '2px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderTop: '1px solid var(--border)', paddingTop: '8px', marginTop: '2px', gap: '8px', flexWrap: 'wrap' }}>
                         <span style={{ fontSize: '11px', color: 'var(--text-dim)' }}>
                           {filledCount} of {qs.length} answered
                         </span>
-                        <button
-                          onClick={() => submitQuestionAnswers(qs)}
-                          disabled={busy || filledCount === 0}
-                          data-testid="submit-answers-btn"
-                          className="mx-btn mx-btn-primary"
-                          style={{ fontSize: '12px', padding: '6px 14px' }}
-                        >
-                          Submit answers
-                        </button>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <button
+                            onClick={() => { setActiveAnswers({}); submitPrompt('Skip the questions and build with sensible defaults.'); }}
+                            disabled={busy}
+                            data-testid="skip-questions-btn"
+                            className="mx-btn mx-btn-ghost"
+                            style={{ fontSize: '11px', padding: '6px 12px' }}
+                            title="Skip these questions — Manifex picks reasonable defaults and starts building"
+                          >
+                            Skip & build with defaults
+                          </button>
+                          <button
+                            onClick={() => submitQuestionAnswers(qs)}
+                            disabled={busy || filledCount === 0}
+                            data-testid="submit-answers-btn"
+                            className="mx-btn mx-btn-primary"
+                            style={{ fontSize: '12px', padding: '6px 14px' }}
+                          >
+                            Submit answers
+                          </button>
+                        </div>
                       </div>
                     )}
                   </div>
