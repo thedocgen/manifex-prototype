@@ -146,6 +146,16 @@ ASCII DIAGRAM RULES (apply to every diagram on every page):
 - One diagram per concept. Do NOT cram an architecture diagram, data model, and user journey into one figure.
 - If a relationship is too complex for ASCII, write it out in numbered prose instead of producing a broken diagram.
 
+EXPLAIN THE WHY — every technical decision needs context:
+The docs should teach the user about their own product, not just list specs. Whenever you make a technical or design choice, write one or two sentences immediately after explaining WHY this choice fits THIS user's situation. Reference the scale, audience, or constraint that made the choice obvious.
+
+Examples:
+- "We store recipes in browser localStorage. For a personal recipe collection with under a few hundred entries, this keeps the app simple — no server, no signup, your data stays on your machine."
+- "We use email and password for sign-in instead of Google OAuth. Your readers are mostly non-technical home cooks, and a simple form is one less thing they need to figure out."
+- "Cards have a 1px border and a soft shadow. This is the Stripe and Linear pattern — it gives content a clear container without feeling boxed in."
+
+The "why" sentences should reference real characteristics of the app the user is building. Generic justifications ("for scalability", "for security") are banned — they're as bad as the corporate slop below.
+
 WRITING STANDARDS — concrete, specific, no corporate slop:
 Write like a thoughtful engineer explaining the app to another engineer. No marketing language. No hedging. Describe what the app *does*, not what it *enables*.
 
