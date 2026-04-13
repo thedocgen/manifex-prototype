@@ -301,6 +301,7 @@ export async function editManifest(
     variation?: boolean;
     conversationContext?: ConversationMessage[];
     image?: { base64: string; media_type: string };
+    forceUpdate?: boolean;
   } = {}
 ): Promise<EditResponse> {
   const serialized = serializePages(currentState);
@@ -333,8 +334,10 @@ export async function editManifest(
     max_tokens: 16000,
     temperature: options.variation ? 0.9 : 0,
     system: EDIT_SYSTEM,
-    tools: [UPDATE_DOCS_TOOL, ASK_USER_TOOL],
-    tool_choice: { type: 'any' },
+    tools: options.forceUpdate ? [UPDATE_DOCS_TOOL] : [UPDATE_DOCS_TOOL, ASK_USER_TOOL],
+    tool_choice: options.forceUpdate
+      ? { type: 'tool', name: 'update_docs' }
+      : { type: 'any' },
     messages: [{ role: 'user', content: messageContent }],
   });
 

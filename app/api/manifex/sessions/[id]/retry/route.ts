@@ -11,11 +11,16 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const prompt = session.pending_attempt.prompt;
   const attemptNum = session.pending_attempt.attempt_number + 1;
 
-  const response = await editManifest(session.manifest_state, prompt, { variation: true });
+  let response;
+  try {
+    response = await editManifest(session.manifest_state, prompt, { variation: true, forceUpdate: true });
+  } catch (e: any) {
+    console.error('[retry] editManifest failed:', e?.message);
+    return NextResponse.json({ error: 'Could not retry your request right now. Try again in a moment.', detail: e?.message || 'unknown' }, { status: e?.status || 500 });
+  }
 
-  // Retry always forces an update (no questions on retry)
+  // forceUpdate guarantees an update response
   if (response.type === 'question') {
-    // If LLM asks on retry, just re-run with the original approach
     return NextResponse.json({ error: 'retry produced question instead of update' }, { status: 500 });
   }
 
