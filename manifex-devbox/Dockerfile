@@ -1,13 +1,13 @@
 FROM ubuntu:24.04
 
-# Phase 2B pivot: v3-claude-agent.
-# Devboxes now run Claude Code CLI as the builder. Manifex never
-# generates code directly — each /__run call hands Claude the current
-# doc bundle and lets it build/modify /app/workspace like a developer.
-# The image therefore ships with: a small Node runtime for the agent
-# server, Claude Code CLI (--dangerously-skip-permissions ready), and
-# the common dev toolchain Claude will reach for (build tools, python,
-# sqlite, ripgrep). Image stays under a few hundred MB.
+# Phase 2B pivot-back: v3.1-lean.
+# The devbox is dumb. It is a remote filesystem + shell that a Claude
+# agent running INSIDE manifex-wip reaches into via /__files, /__write,
+# /__read, /__ls, /__exec. No Claude CLI on the box, no ANTHROPIC_API_KEY
+# in the box env, no builder intelligence. Everything LLM-shaped runs
+# server-side on manifex-wip; the box just executes bash and stores
+# files. Same base image shape as v3-claude-agent minus Claude Code
+# install.
 
 ENV DEBIAN_FRONTEND=noninteractive \
     NODE_VERSION=20 \
@@ -23,11 +23,6 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends nodejs \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
-
-# Claude Code CLI — the whole point of the v3 image. Installed globally
-# so any cwd can spawn `claude --dangerously-skip-permissions`.
-RUN npm install -g @anthropic-ai/claude-code@latest \
- && claude --version || true
 
 RUN mkdir -p /agent /app/workspace
 COPY agent/server.js /agent/server.js

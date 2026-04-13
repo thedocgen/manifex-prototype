@@ -149,175 +149,118 @@ async function handleFiles(req, res) {
   return jsonResponse(res, 200, { ok: true, files: written });
 }
 
-// ---- /__run (v3-claude-agent) --------------------------------------------
+// ---- /__write (single-file write, non-destructive) ---------------------
 //
-// Phase 2B pivot: replaces the per-call bash setup.sh / run.sh exec model.
-// The client POSTs the current Manifex doc bundle as spec_md plus a goal
-// string. We:
-//   1. Ensure /app/workspace is a git repo (init on first call)
-//   2. Write the spec to /app/workspace/.manifex/spec.md
-//   3. Spawn `claude --dangerously-skip-permissions -p "<composed prompt>"`
-//      in /app/workspace and stream stdout/stderr to the log ring buffer
-//   4. On clean exit, git add -A && git commit -m "build: <sha8>" so
-//      every build is a real commit
-//   5. Return { ok, exit_code, duration_ms, git_sha }
-//
-// The Claude CLI is responsible for:
-//   - Reading the spec + current workspace
-//   - Installing packages, editing files, running tests
-//   - Starting the dev server (via bash &, nohup, tmux — its call)
-//   - Writing the dev-server port to /app/workspace/.manifex-port
-//
-// Unblocked — bypass-permissions, no tool allowlist. Blast radius is one
-// devbox. ANTHROPIC_API_KEY comes from the machine env injected by the
-// Manifex devbox orchestrator at spawn time.
-
-const MANIFEX_DIR = path.join(WORKSPACE, '.manifex');
-const SPEC_PATH = path.join(MANIFEX_DIR, 'spec.md');
-
-async function execCapture(cmd, args, opts = {}) {
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd: WORKSPACE, ...opts });
-    let out = '';
-    let err = '';
-    child.stdout?.on('data', d => { out += d.toString('utf8'); });
-    child.stderr?.on('data', d => { err += d.toString('utf8'); });
-    child.on('exit', (code, signal) => resolve({ code, signal, out, err }));
-    child.on('error', e => resolve({ code: -1, signal: null, out, err: String(e) }));
-  });
-}
-
-async function ensureGitRepo() {
-  try {
-    await fsp.mkdir(WORKSPACE, { recursive: true });
-    const gitDir = path.join(WORKSPACE, '.git');
-    const exists = await fsp.stat(gitDir).then(() => true, () => false);
-    if (!exists) {
-      await execCapture('git', ['init', '-q', '-b', 'main']);
-      await execCapture('git', ['config', 'user.email', 'claude@manifex.dev']);
-      await execCapture('git', ['config', 'user.name', 'Manifex Build']);
-      // Initial empty commit so later diffs always have a parent.
-      await execCapture('git', ['commit', '--allow-empty', '-m', 'init']);
-    }
-  } catch (e) {
-    pushLog(`[agent] ensureGitRepo failed: ${e && e.message}\n`);
-  }
-}
-
-async function gitHeadSha() {
-  const r = await execCapture('git', ['rev-parse', 'HEAD']);
-  return (r.out || '').trim() || null;
-}
-
-async function gitCommitAll(summary) {
-  // git add everything including deletions; then commit, allowing an
-  // empty commit so we always get a sha back even if Claude made no
-  // changes (useful for diagnostics — 'nothing to commit' is a signal).
-  await execCapture('git', ['add', '-A']);
-  const msg = `build: ${summary || 'claude run'}`.slice(0, 200);
-  await execCapture('git', ['commit', '--allow-empty', '-m', msg]);
-  return await gitHeadSha();
-}
-
-function composeClaudePrompt(specMd, goal) {
-  const fallbackGoal = 'Bring the code in /app/workspace into alignment with the spec at .manifex/spec.md. If /app/workspace is empty, create the project from scratch. If it already has code, make the smallest incremental set of edits needed to match the spec. Install any packages you need via apt or npm. Start the dev server in the background (nohup, disown, &) and write its port to /app/workspace/.manifex-port. Commit logical units with git.';
-  const g = (goal && goal.trim()) ? goal.trim() : fallbackGoal;
-  return [
-    'You are building a web app from a Manifex documentation spec.',
-    '',
-    'Working directory: /app/workspace (already your cwd).',
-    'Spec (read this first): .manifex/spec.md',
-    '',
-    `Goal: ${g}`,
-    '',
-    'Rules:',
-    '- The spec is the source of truth. Follow every page literally. The Environment page (if present) declares the stack — use it.',
-    '- Prefer incremental edits when files already exist. Read the current tree before deciding what to write.',
-    '- Use any tool you need (bash, file edits, package install, curl) with no approval prompts — permissions are bypassed.',
-    '- Start the dev server in the background (nohup bash -c "npx next dev -H 0.0.0.0 -p 3000 > .manifex/dev.log 2>&1 &" or equivalent for the stack). Do NOT block the foreground task on the dev server.',
-    '- After starting the dev server, write the port as a decimal integer to /app/workspace/.manifex-port (e.g. echo 3000 > /app/workspace/.manifex-port).',
-    '- Verify the dev server is actually listening before you finish (curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<port>/ should return a 2xx or 3xx).',
-    '- When done, print a one-line summary starting with "BUILD_SUMMARY:" that describes what you changed.',
-    '- Do NOT commit — the agent will run git add/commit after you exit.',
-  ].join('\n');
-}
-
-async function handleRun(req, res) {
+// Phase 2B pivot-back: the Manifex-side Claude agent's write_file tool
+// lands here. Unlike /__files (stage+swap whole workspace), /__write
+// touches exactly one path and leaves everything else intact, so the
+// agent can build the project incrementally without wiping its own
+// progress.
+async function handleWrite(req, res) {
   let payload;
   try {
-    const body = await readBody(req, 8 * 1024 * 1024);
+    const body = await readBody(req, 16 * 1024 * 1024);
     payload = JSON.parse(body);
   } catch (e) {
     return jsonResponse(res, 400, { error: `invalid body: ${e.message}` });
   }
-  const specMd = payload && typeof payload.spec_md === 'string' ? payload.spec_md : '';
-  const goal = payload && typeof payload.goal === 'string' ? payload.goal : '';
-  const permissionMode = (payload && typeof payload.permission_mode === 'string')
-    ? payload.permission_mode
-    : 'bypassPermissions';
-  if (!specMd.trim()) {
-    return jsonResponse(res, 400, { error: 'spec_md (non-empty string) required' });
+  const relPath = payload && typeof payload.path === 'string' ? payload.path : '';
+  const content = payload && typeof payload.content === 'string' ? payload.content : null;
+  if (!relPath) return jsonResponse(res, 400, { error: 'path required' });
+  if (content === null) return jsonResponse(res, 400, { error: 'content (string) required' });
+
+  const norm = path.posix.normalize(relPath);
+  if (norm.startsWith('..') || path.isAbsolute(norm)) {
+    return jsonResponse(res, 400, { error: `unsafe path: ${relPath}` });
   }
-
-  resetLogs();
-  pushLog(`[agent] /__run starting (spec ${specMd.length}b, permission_mode=${permissionMode})\n`);
-
+  const full = path.join(WORKSPACE, norm);
   try {
-    await ensureGitRepo();
-    await fsp.mkdir(MANIFEX_DIR, { recursive: true });
-    await fsp.writeFile(SPEC_PATH, specMd, 'utf8');
-    pushLog(`[agent] wrote spec to ${SPEC_PATH}\n`);
+    await fsp.mkdir(path.dirname(full), { recursive: true });
+    await fsp.writeFile(full, content, 'utf8');
+    const bytes = Buffer.byteLength(content, 'utf8');
+    return jsonResponse(res, 200, { ok: true, path: norm, bytes });
   } catch (e) {
-    return jsonResponse(res, 500, { error: `spec write failed: ${e && e.message}` });
+    return jsonResponse(res, 500, { error: (e && e.message) || String(e) });
   }
+}
 
-  const prompt = composeClaudePrompt(specMd, goal);
-  const claudeArgs = ['-p', prompt];
-  // --dangerously-skip-permissions is the Claude Code CLI flag for bypass
-  // mode. We're deliberately unblocked here — Claude owns the box.
-  if (permissionMode === 'bypassPermissions') {
-    claudeArgs.unshift('--dangerously-skip-permissions');
-  }
-
-  pushLog(`\n$ claude ${claudeArgs.slice(0, 2).join(' ')} <prompt ${prompt.length}b>\n`);
-
-  const started = Date.now();
-  const child = spawn('claude', claudeArgs, {
-    cwd: WORKSPACE,
-    env: { ...process.env },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  runningProc = child;
-
-  child.stdout.on('data', d => pushLog(d.toString('utf8')));
-  child.stderr.on('data', d => pushLog(d.toString('utf8')));
-
-  const exit = await new Promise(resolve => {
-    child.on('exit', (code, signal) => resolve({ code, signal }));
-    child.on('error', e => resolve({ code: -1, signal: null, error: String(e) }));
-  });
-  const duration_ms = Date.now() - started;
-  if (runningProc === child) runningProc = null;
-  lastExit = { code: exit.code, signal: exit.signal, at: new Date().toISOString(), cmd: 'claude /__run' };
-  pushLog(`\n[claude exit ${exit.code}${exit.signal ? ' ' + exit.signal : ''} in ${duration_ms}ms]\n`);
-
-  let git_sha = null;
+// ---- /__read (single-file read) ----------------------------------------
+async function handleRead(req, res) {
+  let payload;
   try {
-    git_sha = await gitCommitAll(`claude run exit ${exit.code}`);
-    if (git_sha) pushLog(`[agent] committed ${git_sha.slice(0, 8)}\n`);
+    const body = await readBody(req, 64 * 1024);
+    payload = JSON.parse(body);
   } catch (e) {
-    pushLog(`[agent] git commit failed: ${e && e.message}\n`);
+    return jsonResponse(res, 400, { error: `invalid body: ${e.message}` });
   }
+  const relPath = payload && typeof payload.path === 'string' ? payload.path : '';
+  const maxBytes = payload && Number.isFinite(payload.max_bytes) ? Math.max(1, Math.min(4 * 1024 * 1024, payload.max_bytes)) : 1024 * 1024;
+  if (!relPath) return jsonResponse(res, 400, { error: 'path required' });
 
-  broadcastReload();
+  const norm = path.posix.normalize(relPath);
+  if (norm.startsWith('..') || path.isAbsolute(norm)) {
+    return jsonResponse(res, 400, { error: `unsafe path: ${relPath}` });
+  }
+  const full = path.join(WORKSPACE, norm);
+  try {
+    const st = await fsp.stat(full).catch(() => null);
+    if (!st) return jsonResponse(res, 200, { exists: false, content: '', bytes: 0 });
+    if (!st.isFile()) return jsonResponse(res, 200, { exists: true, is_file: false, content: '', bytes: 0 });
+    const fd = await fsp.open(full, 'r');
+    try {
+      const size = Math.min(st.size, maxBytes);
+      const buf = Buffer.alloc(size);
+      await fd.read(buf, 0, size, 0);
+      return jsonResponse(res, 200, {
+        exists: true,
+        is_file: true,
+        content: buf.toString('utf8'),
+        bytes: size,
+        truncated: st.size > maxBytes,
+        total_size: st.size,
+      });
+    } finally {
+      await fd.close();
+    }
+  } catch (e) {
+    return jsonResponse(res, 500, { error: (e && e.message) || String(e) });
+  }
+}
 
-  return jsonResponse(res, 200, {
-    ok: exit.code === 0,
-    exit_code: exit.code,
-    signal: exit.signal,
-    duration_ms,
-    git_sha,
-  });
+// ---- /__ls (list files) ------------------------------------------------
+async function handleLs(req, res) {
+  let payload;
+  try {
+    const body = await readBody(req, 64 * 1024);
+    payload = JSON.parse(body);
+  } catch (e) {
+    return jsonResponse(res, 400, { error: `invalid body: ${e.message}` });
+  }
+  const relPath = payload && typeof payload.path === 'string' ? payload.path : '.';
+  const norm = path.posix.normalize(relPath);
+  if (norm.startsWith('..') || path.isAbsolute(norm)) {
+    return jsonResponse(res, 400, { error: `unsafe path: ${relPath}` });
+  }
+  const full = path.join(WORKSPACE, norm === '.' ? '' : norm);
+  try {
+    const st = await fsp.stat(full).catch(() => null);
+    if (!st) return jsonResponse(res, 200, { exists: false, entries: [] });
+    if (!st.isDirectory()) return jsonResponse(res, 200, { exists: true, is_dir: false, entries: [] });
+    const names = await fsp.readdir(full);
+    const entries = await Promise.all(names.sort().map(async name => {
+      const full2 = path.join(full, name);
+      const s = await fsp.stat(full2).catch(() => null);
+      if (!s) return { name, type: 'unknown', size: 0 };
+      return {
+        name,
+        type: s.isDirectory() ? 'dir' : (s.isFile() ? 'file' : 'other'),
+        size: s.size,
+      };
+    }));
+    return jsonResponse(res, 200, { exists: true, is_dir: true, entries });
+  } catch (e) {
+    return jsonResponse(res, 500, { error: (e && e.message) || String(e) });
+  }
 }
 
 // ---- /__exec -------------------------------------------------------------
@@ -494,8 +437,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    if (url === '/__run' && method === 'POST') return await handleRun(req, res);
     if (url === '/__files' && method === 'POST') return await handleFiles(req, res);
+    if (url === '/__write' && method === 'POST') return await handleWrite(req, res);
+    if (url === '/__read' && method === 'POST') return await handleRead(req, res);
+    if (url === '/__ls' && method === 'POST') return await handleLs(req, res);
     if (url === '/__exec' && method === 'POST') return await handleExec(req, res);
     if (url === '/__logs' && method === 'GET') return handleLogs(req, res);
     if (url === '/__events' && method === 'GET') return handleEvents(req, res);

@@ -608,91 +608,80 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     if (el) el.scrollTop = el.scrollHeight;
   }, [buildLog]);
 
-  // Phase 2B pivot — Claude-on-the-devbox orchestration. The server's
-  // /build route concatenates the doc bundle into spec_md, the client
-  // POSTs it straight to the devbox's /__run endpoint, and Claude Code
-  // (running with --dangerously-skip-permissions inside the devbox)
-  // reads the spec + current workspace and builds / edits the project
-  // like a developer would. No compile pass on Manifex's side.
+  // Phase 2B pivot-back — server-side Claude agent loop.
   //
-  // Stages surfaced to the panel header:
-  //   compile → 'build' (GET spec_md + devbox URLs from /build)
-  //   claude  → Claude is actively running on the devbox
-  //   wait_port → Claude has exited, we're probing for the dev server
-  //   done    → iframe reloads
-  const runClaudeOnDevbox = async (
-    runUrl: string,
-    specMd: string,
-    goal: string,
-    devboxUrl: string,
-  ): Promise<{ ok: boolean; stage: string; detail?: string; git_sha?: string }> => {
-    setProvisionStage('claude');
-    let runResult: { ok?: boolean; exit_code?: number; duration_ms?: number; git_sha?: string } | null = null;
+  // The server's /build endpoint runs the Claude tool_use loop itself
+  // (primitives: bash, write_file, read_file, list_files) and streams
+  // SSE events back describing every iteration. The client just reads
+  // the stream and appends human-readable lines to the build log panel.
+  //
+  // SSE event types:
+  //   start           { manifest_sha, devbox_url, spec_bytes }
+  //   iteration       { n }
+  //   tool_use        { id, iteration, name, input }
+  //   tool_result     { id, iteration, ok, summary }
+  //   assistant_text  { iteration, text }
+  //   done            { iterations, duration_ms, final_text }
+  //   error           { message, stage }
+  const streamBuild = async (
+    buildUrl: string,
+    onEvent: (event: string, data: any) => void,
+  ): Promise<{ ok: boolean; detail?: string }> => {
+    let res: Response;
     try {
-      const runRes = await fetch(runUrl, {
+      res = await fetch(buildUrl, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ spec_md: specMd, goal, permission_mode: 'bypassPermissions' }),
+        headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
       });
-      // Claude runs for minutes; the agent responds when the CLI exits.
-      // The browser's default fetch timeout is long (browser-specific;
-      // typically 5-10 min without intervention). We don't wrap in
-      // AbortSignal.timeout — the log panel shows progress and the user
-      // can navigate away.
-      if (!runRes.ok) {
-        const text = await runRes.text().catch(() => '');
-        return { ok: false, stage: 'claude', detail: `__run ${runRes.status} ${text.slice(0, 200)}` };
-      }
-      runResult = await runRes.json().catch(() => ({}));
     } catch (e: any) {
-      return { ok: false, stage: 'claude', detail: e?.message || String(e) };
+      return { ok: false, detail: e?.message || String(e) };
     }
-
-    if (!runResult?.ok) {
-      return {
-        ok: false,
-        stage: 'claude',
-        detail: `claude exited ${runResult?.exit_code ?? '?'}`,
-        git_sha: runResult?.git_sha,
-      };
-    }
-
-    // Poll the agent's health + a probe on GET / until the dev server
-    // Claude started is actually serving something other than the
-    // "Building your app…" stub.
-    setProvisionStage('wait_port');
-    const base = devboxUrl.replace(/\/+$/, '');
-    const waitStarted = Date.now();
-    const MAX_WAIT_MS = 180_000;
-    const POLL_MS = 1500;
-    while (Date.now() - waitStarted < MAX_WAIT_MS) {
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      let msg = `build ${res.status}`;
       try {
-        const h = await fetch(`${base}/__health`);
-        if (h.ok) {
-          const health = await h.json().catch(() => ({}));
-          const probe = await fetch(`${base}/`, { cache: 'no-store' }).catch(() => null);
-          if (probe && probe.ok) {
-            const body = await probe.text().catch(() => '');
-            if (!body.includes('Building your app…')) {
-              setProvisionStage('done');
-              return { ok: true, stage: 'done', git_sha: runResult.git_sha };
-            }
-          }
-          if (!health?.dev_port) {
-            // Claude never wrote .manifex-port. That's a soft failure —
-            // the box is healthy but the build didn't start a dev
-            // server. Bubble up a diagnostic.
-          }
-        }
+        const parsed = JSON.parse(text);
+        if (parsed?.error) msg = parsed.error;
       } catch {}
-      await new Promise(r => setTimeout(r, POLL_MS));
+      return { ok: false, detail: msg };
     }
-    return {
-      ok: false,
-      stage: 'wait_port',
-      detail: `dev server did not respond within ${Math.round(MAX_WAIT_MS / 1000)}s after Claude exited`,
-      git_sha: runResult.git_sha,
-    };
+    if (!res.body) return { ok: false, detail: 'no response body' };
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let sawDone = false;
+    let sawError: string | null = null;
+
+    // Minimal SSE frame parser: event: NAME\ndata: JSON\n\n
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      while (true) {
+        const sep = buf.indexOf('\n\n');
+        if (sep < 0) break;
+        const frame = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        const lines = frame.split('\n');
+        let evName = 'message';
+        let dataStr = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) evName = line.slice(7).trim();
+          else if (line.startsWith('data: ')) dataStr += (dataStr ? '\n' : '') + line.slice(6);
+        }
+        if (!dataStr) continue;
+        let parsed: any = dataStr;
+        try { parsed = JSON.parse(dataStr); } catch {}
+        onEvent(evName, parsed);
+        if (evName === 'done') sawDone = true;
+        if (evName === 'error') sawError = (parsed && parsed.message) || 'error';
+      }
+    }
+
+    if (sawError) return { ok: false, detail: sawError };
+    if (!sawDone) return { ok: false, detail: 'build stream ended without done event' };
+    return { ok: true };
   };
 
   const renderInBackground = async () => {
@@ -713,15 +702,12 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       const dbRes = await fetch(`/api/manifex/sessions/${id}/devbox`, { method: 'POST' });
       if (dbRes.ok) {
         const dbData = await dbRes.json();
-        if (dbData?.session) {
-          setSession(dbData.session);
-          // Phase 2B: as soon as we know the devbox URL, subscribe to its
-          // /__logs stream so the build-log panel is live-tailing apt
-          // + npm + next output by the time the /render POST starts
-          // streaming work through /__exec.
-          const devboxUrl = (dbData.session?.manifest_state as any)?.devbox?.url;
-          if (devboxUrl) openBuildLogStream(devboxUrl);
-        }
+        if (dbData?.session) setSession(dbData.session);
+        // Phase 2B pivot-back: the /build SSE stream carries every
+        // tool_use + tool_result event the agent emits, so we feed
+        // the log panel directly from that stream. The agent's raw
+        // /__logs tail is still available on demand but no longer
+        // automatically attached here (it would duplicate output).
       } else if (dbRes.status === 503) {
         const dbErr = await dbRes.json().catch(() => ({}));
         setPreviewError(dbErr?.error || 'Too many devboxes are running. Stop one before opening another.');
@@ -745,31 +731,60 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     try {
       try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'compiling' }); } catch {}
       setProvisionStage('build');
-      const res = await fetch(`/api/manifex/sessions/${id}/build`, { method: 'POST' });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        setPreviewError(data?.error || 'Something went wrong starting your build. Try making another change.');
-        return;
-      }
-      if (!data?.spec_md || !data?.run_url || !data?.devbox_url) {
-        setPreviewError('Build endpoint returned an incomplete payload. Try reopening the session.');
-        return;
-      }
-
-      // Hand the spec to Claude running on the devbox and let it build.
-      const result = await runClaudeOnDevbox(
-        data.run_url,
-        data.spec_md as string,
-        (data.goal as string) || '',
-        data.devbox_url as string,
+      const result = await streamBuild(
+        `/api/manifex/sessions/${id}/build`,
+        (event, data) => {
+          if (event === 'start') {
+            setBuildLog(prev => prev + `[build] spec ${data?.spec_bytes ?? 0} bytes on ${data?.devbox_url ?? '?'}\n`);
+          } else if (event === 'iteration') {
+            setProvisionStage(`turn ${data?.n ?? '?'}`);
+          } else if (event === 'tool_use') {
+            const input = data?.input || {};
+            let line = `→ ${data?.name}(`;
+            if (data?.name === 'bash') line += JSON.stringify(input.cmd || '').slice(0, 200);
+            else if (data?.name === 'write_file') line += `${input.path || '?'}, ${(input.content || '').length}b`;
+            else if (data?.name === 'read_file') line += String(input.path || '?');
+            else if (data?.name === 'list_files') line += String(input.path || '.');
+            else line += JSON.stringify(input).slice(0, 200);
+            line += ')\n';
+            setBuildLog(prev => prev + line);
+          } else if (event === 'tool_result') {
+            setBuildLog(prev => prev + `  ${data?.ok ? '✓' : '✗'} ${data?.summary || ''}\n`);
+          } else if (event === 'assistant_text') {
+            const text = (data?.text || '').slice(0, 2000);
+            setBuildLog(prev => prev + `\n[claude] ${text}\n\n`);
+          } else if (event === 'done') {
+            setBuildLog(prev => prev + `\n[done] ${data?.iterations ?? '?'} turns in ${Math.round((data?.duration_ms ?? 0) / 1000)}s\n${data?.final_text || ''}\n`);
+          } else if (event === 'error') {
+            setBuildLog(prev => prev + `\n[error] ${data?.message || 'unknown'} (${data?.stage || ''})\n`);
+          }
+        },
       );
-
       if (!result.ok) {
-        setPreviewError(
-          `Build stalled at ${result.stage}${result.detail ? `: ${result.detail}` : ''}`,
-        );
+        setPreviewError(`Build failed: ${result.detail || 'unknown'}`);
         return;
       }
+
+      // Probe the devbox for the running dev server before flipping the
+      // iframe — Claude is responsible for starting it and writing the
+      // port, but we still need to wait for the first request to land.
+      setProvisionStage('wait_port');
+      const devbox = (session?.manifest_state as any)?.devbox;
+      if (devbox?.url) {
+        const base = String(devbox.url).replace(/\/+$/, '');
+        const waitStarted = Date.now();
+        while (Date.now() - waitStarted < 120_000) {
+          try {
+            const probe = await fetch(`${base}/`, { cache: 'no-store' });
+            if (probe.ok) {
+              const body = await probe.text().catch(() => '');
+              if (!body.includes('Building your app…')) break;
+            }
+          } catch {}
+          await new Promise(r => setTimeout(r, 1500));
+        }
+      }
+      setProvisionStage('done');
 
       // Flip the iframe from the skeleton to the live devbox. Setting
       // previewHtml to a stub is purely a gate for the existing render

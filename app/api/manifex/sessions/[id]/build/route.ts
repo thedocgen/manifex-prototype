@@ -1,23 +1,46 @@
-import { NextResponse } from 'next/server';
 import { getSession } from '@/lib/store';
 import type { ManifexSession, ManifestState } from '@/lib/types';
+import Anthropic from '@anthropic-ai/sdk';
 
-// Phase 2B pivot — /build replaces /render.
+// Phase 2B pivot-back — /build.
 //
-// Manifex no longer generates code itself. This endpoint:
-//   1. Loads the session and concatenates its 7 doc pages into a single
-//      markdown spec the devbox's Claude agent will read.
-//   2. Returns the spec + composed goal + devbox URLs to the client.
+// Runs a Claude tool_use agent loop INSIDE manifex-wip. Claude has a
+// tiny, deliberately un-curated set of primitives that it uses to
+// build the project on the session's devbox:
 //
-// The client then POSTs <devbox_url>/__run { spec_md, goal } directly so
-// the long-running Claude build (often minutes) never ties up a server
-// HTTP request — manifex-wip's own Fly machine can go idle mid-build.
+//   bash(cmd)                  → POST <devbox>/__exec
+//   write_file(path, content)  → POST <devbox>/__write
+//   read_file(path)            → POST <devbox>/__read
+//   list_files(path)           → POST <devbox>/__ls
+//
+// ask_user / set_session_secret / get_session_secret are reserved as
+// primitives #5-7 per Jesse's hard design constraint but are deferred
+// until the core build loop UAT passes — adding them early means DB
+// state for suspendable loops, which is a separate chunk.
+//
+// NO harnesses. NO wrappers. If Claude needs to install a package,
+// deploy to Vercel, call an external API, or do literally anything
+// exotic, it uses bash. The Manifex codebase gains new capabilities
+// from model improvements + bash, not from new Manifex features.
+//
+// The response is an SSE stream:
+//   event: tool_use       data: { id, iteration, name, input }
+//   event: tool_result    data: { id, iteration, ok, summary }
+//   event: assistant_text data: { iteration, text }
+//   event: done           data: { iterations, duration_ms, final_text }
+//   event: error          data: { message, stage }
+//
+// The client reads the stream line-by-line off a POST response body.
+// EventSource doesn't support POST, so the editor uses fetch + a
+// simple SSE parser.
+
+export const runtime = 'nodejs';
+export const maxDuration = 600; // 10 min — long enough for a full Claude build
 
 interface DevboxAttached {
   url: string;
   app_name: string;
   machine_id: string;
-  last_provisioned_sha?: string;
 }
 
 function getDevbox(session: ManifexSession): DevboxAttached | null {
@@ -26,60 +49,417 @@ function getDevbox(session: ManifexSession): DevboxAttached | null {
   return d as DevboxAttached;
 }
 
-// Order the pages in a stable, canonical way so the same manifest_sha
-// always produces byte-identical spec_md. Tree order is what the editor
-// shows; we fall back to object key order for any pages not in the tree.
 function concatenateSpec(state: ManifestState): string {
   const seen = new Set<string>();
   const parts: string[] = [];
-  const push = (path: string) => {
-    if (seen.has(path)) return;
-    seen.add(path);
-    const page = state.pages[path];
+  const push = (p: string) => {
+    if (seen.has(p)) return;
+    seen.add(p);
+    const page = state.pages[p];
     if (!page) return;
-    parts.push(`---\npath: ${path}\ntitle: ${JSON.stringify(page.title || path)}\n---\n\n${page.content || ''}`);
+    parts.push(`---\npath: ${p}\ntitle: ${JSON.stringify(page.title || p)}\n---\n\n${page.content || ''}`);
   };
   for (const node of state.tree || []) push(node.path);
   for (const path of Object.keys(state.pages || {})) push(path);
   return parts.join('\n\n');
 }
 
+// ---- Tool primitives -----------------------------------------------------
+
+const TOOLS: Anthropic.Messages.Tool[] = [
+  {
+    name: 'bash',
+    description: 'Run a bash command on the devbox as root. Use this for anything the other primitives do not cover — installing packages (apt, npm, pip), starting dev servers in the background (nohup, &, disown), invoking git, calling external APIs with curl, running test suites, chmod, chown, whatever. The devbox is ephemeral, single-tenant, and has no approval prompts. Current working directory defaults to /app/workspace unless you cd elsewhere.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        cmd: { type: 'string' as const, description: 'Full bash command line to run via bash -lc. Multi-line OK. Background long-running processes (dev servers) with nohup + & + disown so the tool call returns.' },
+        cwd: { type: 'string' as const, description: 'Working directory relative to /app/workspace. Defaults to /app/workspace.' },
+        detach: { type: 'boolean' as const, description: 'If true, return immediately without waiting for the command to finish. Use for dev servers (next dev, etc).' },
+      },
+      required: ['cmd' as const],
+    },
+  },
+  {
+    name: 'write_file',
+    description: 'Write (or overwrite) a single file on the devbox at /app/workspace/<path>. Creates parent directories as needed. Non-destructive — leaves every other file alone. Use for every source file, config, script you add to the project.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        path: { type: 'string' as const, description: 'File path relative to /app/workspace (no leading slash, no ..)' },
+        content: { type: 'string' as const, description: 'Full UTF-8 file content.' },
+      },
+      required: ['path' as const, 'content' as const],
+    },
+  },
+  {
+    name: 'read_file',
+    description: 'Read a single file from the devbox at /app/workspace/<path>. Returns up to 1 MB by default. Use this before editing an existing file.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        path: { type: 'string' as const, description: 'File path relative to /app/workspace (no leading slash, no ..)' },
+        max_bytes: { type: 'integer' as const, description: 'Optional read cap (default 1048576). If the file is larger the result is truncated and a truncated flag is set.' },
+      },
+      required: ['path' as const],
+    },
+  },
+  {
+    name: 'list_files',
+    description: 'List the entries in a directory on the devbox at /app/workspace/<path>. Returns names, types (file/dir), and sizes. Use before writing to avoid clobbering.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        path: { type: 'string' as const, description: 'Directory path relative to /app/workspace. Defaults to the workspace root.' },
+      },
+    },
+  },
+];
+
+// ---- Tool execution ------------------------------------------------------
+
+interface ToolExecResult {
+  ok: boolean;
+  // Short human summary for SSE events.
+  summary: string;
+  // Full payload sent back to Claude as tool_result content.
+  content: string;
+}
+
+async function execTool(
+  devboxUrl: string,
+  name: string,
+  rawInput: unknown,
+): Promise<ToolExecResult> {
+  const input = (rawInput && typeof rawInput === 'object') ? (rawInput as Record<string, unknown>) : {};
+  const base = devboxUrl.replace(/\/+$/, '');
+
+  try {
+    if (name === 'bash') {
+      const cmd = typeof input.cmd === 'string' ? input.cmd : '';
+      const cwd = typeof input.cwd === 'string' && input.cwd.trim()
+        ? `/app/workspace/${input.cwd}`.replace(/\/+$/, '') || '/app/workspace'
+        : '/app/workspace';
+      const detach = Boolean(input.detach);
+      if (!cmd.trim()) return { ok: false, summary: 'bash: empty cmd', content: 'error: cmd required' };
+
+      const res = await fetch(`${base}/__exec`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cmd, cwd, detach }),
+        signal: AbortSignal.timeout(detach ? 30_000 : 540_000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        return { ok: false, summary: `bash: ${res.status}`, content: `error: __exec ${res.status} ${text.slice(0, 500)}` };
+      }
+      const data = await res.json().catch(() => ({}));
+      if (detach) {
+        return {
+          ok: true,
+          summary: `bash [detached] pid=${data?.pid ?? '?'}`,
+          content: `detached; pid=${data?.pid ?? '?'}`,
+        };
+      }
+      const exitCode = data?.exit_code ?? -1;
+      // Tail the log ring buffer to surface the actual stdout/stderr.
+      // /__exec's response only returns exit metadata; stdout is in the
+      // log stream. Grab a recent window.
+      const tail = await fetchLogTail(base, 4000);
+      const ok = exitCode === 0;
+      return {
+        ok,
+        summary: `bash exit=${exitCode} (${data?.duration_ms ?? 0}ms)`,
+        content: `exit_code: ${exitCode}\nduration_ms: ${data?.duration_ms ?? 0}\n--- output tail ---\n${tail}`,
+      };
+    }
+
+    if (name === 'write_file') {
+      const p = typeof input.path === 'string' ? input.path : '';
+      const content = typeof input.content === 'string' ? input.content : '';
+      if (!p) return { ok: false, summary: 'write_file: empty path', content: 'error: path required' };
+      const res = await fetch(`${base}/__write`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: p, content }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        return { ok: false, summary: `write_file: ${res.status}`, content: `error: __write ${res.status} ${text.slice(0, 300)}` };
+      }
+      const data = await res.json().catch(() => ({}));
+      return {
+        ok: true,
+        summary: `wrote ${p} (${data?.bytes ?? 0}b)`,
+        content: `ok: wrote ${data?.path ?? p} (${data?.bytes ?? 0} bytes)`,
+      };
+    }
+
+    if (name === 'read_file') {
+      const p = typeof input.path === 'string' ? input.path : '';
+      const max_bytes = typeof input.max_bytes === 'number' ? input.max_bytes : undefined;
+      if (!p) return { ok: false, summary: 'read_file: empty path', content: 'error: path required' };
+      const res = await fetch(`${base}/__read`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: p, max_bytes }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        return { ok: false, summary: `read_file: ${res.status}`, content: `error: __read ${res.status} ${text.slice(0, 300)}` };
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!data?.exists) return { ok: true, summary: `read_file: ${p} (missing)`, content: `file does not exist: ${p}` };
+      if (!data?.is_file) return { ok: true, summary: `read_file: ${p} (not a file)`, content: `path exists but is not a file: ${p}` };
+      const hdr = data?.truncated ? `TRUNCATED (${data.bytes}/${data.total_size} bytes shown)\n` : '';
+      return {
+        ok: true,
+        summary: `read ${p} (${data.bytes}b${data.truncated ? ' truncated' : ''})`,
+        content: `${hdr}${data.content}`,
+      };
+    }
+
+    if (name === 'list_files') {
+      const p = typeof input.path === 'string' && input.path.trim() ? input.path : '.';
+      const res = await fetch(`${base}/__ls`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ path: p }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        return { ok: false, summary: `list_files: ${res.status}`, content: `error: __ls ${res.status} ${text.slice(0, 300)}` };
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!data?.exists) return { ok: true, summary: `list_files: ${p} (missing)`, content: `directory does not exist: ${p}` };
+      if (!data?.is_dir) return { ok: true, summary: `list_files: ${p} (not a dir)`, content: `path exists but is not a directory: ${p}` };
+      const lines = (data.entries || []).map((e: { name: string; type: string; size: number }) => `${e.type === 'dir' ? 'd' : '-'} ${String(e.size).padStart(9)}  ${e.name}`);
+      return {
+        ok: true,
+        summary: `list_files: ${p} (${lines.length})`,
+        content: lines.length > 0 ? lines.join('\n') : '(empty directory)',
+      };
+    }
+
+    return { ok: false, summary: `unknown tool: ${name}`, content: `error: unknown tool ${name}` };
+  } catch (e: any) {
+    return { ok: false, summary: `${name}: ${e?.message || String(e)}`, content: `error: ${e?.message || String(e)}` };
+  }
+}
+
+// Pull the last N bytes of the devbox's log ring buffer via a quick SSE
+// connect-and-close. The agent pushes stdout/stderr there via pushLog,
+// and /__logs replays the current ring on connect.
+async function fetchLogTail(base: string, maxBytes: number): Promise<string> {
+  try {
+    const res = await fetch(`${base}/__logs`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(2500),
+      headers: { accept: 'text/event-stream' },
+    });
+    if (!res.ok || !res.body) return '';
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    const deadline = Date.now() + 1500;
+    while (Date.now() < deadline && buf.length < maxBytes * 2) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+    }
+    try { reader.cancel(); } catch {}
+    // Extract the first data: JSON frame (the replay of the ring buffer).
+    const m = buf.match(/^data:\s*(.+)$/m);
+    if (!m) return '';
+    try {
+      const parsed = JSON.parse(m[1]);
+      const text = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
+      return text.length > maxBytes ? text.slice(text.length - maxBytes) : text;
+    } catch {
+      return m[1].slice(-maxBytes);
+    }
+  } catch {
+    return '';
+  }
+}
+
+// ---- SSE helpers ---------------------------------------------------------
+
+function sseEvent(event: string, data: unknown): Uint8Array {
+  const payload = typeof data === 'string' ? data : JSON.stringify(data);
+  return new TextEncoder().encode(`event: ${event}\ndata: ${payload}\n\n`);
+}
+
+// ---- Build loop ----------------------------------------------------------
+
+const SYSTEM_PROMPT = `You are the Manifex build agent. A developer has written a documentation spec for a web app and you are building it on a fresh Fly.io devbox (ubuntu:24.04, root, /app/workspace is your working directory, git initialised).
+
+Your primitives are bash, write_file, read_file, list_files. You have nothing else. If you need to install a package, deploy, call an API, or do anything exotic, you do it with bash.
+
+Your workflow on each build:
+1. Use list_files to see the current state of /app/workspace.
+2. Read the spec at .manifex/spec.md with read_file.
+3. Follow the spec literally — every page is the source of truth. The Environment page declares the stack. The Look and Feel page declares the visual design. The Data and Storage page declares the schema. Etc.
+4. If /app/workspace is empty or nearly empty, scaffold the whole project from scratch using write_file + bash (npm install, apt install build-essential, etc).
+5. If /app/workspace already has a partial project, read the relevant files with read_file first and make the SMALLEST set of incremental edits needed to align with the spec. Do not rewrite what's already correct.
+6. Start the dev server in the background using bash with detach=true or nohup+disown. The dev server must bind to 0.0.0.0 (not localhost) on a port of your choosing. Write that port as a decimal integer to /app/workspace/.manifex-port — the devbox agent proxies / to whatever port lives in that file.
+7. Verify the dev server is listening before you finish (curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<port>/ should return a 2xx or 3xx).
+8. Finish with a one-sentence text response starting with "BUILD_SUMMARY:" describing what changed.
+
+Stack decisions (when not explicitly overridden by the Environment page):
+- Default to Next.js 15 App Router + Tailwind v3 + SQLite + Drizzle ORM. It's what Manifex knows best and what the devbox toolchain is tuned for.
+- Use npm (not yarn or pnpm). The box has nodejs 20 preinstalled.
+- For native module build deps (better-sqlite3, etc): the box already has build-essential, python3, sqlite3. You do not need apt install for those.
+
+You have no approval prompts, no permission barriers, no tool allowlist beyond the four primitives. If bash returns a non-zero exit, read the output tail, diagnose, and try again. If you are genuinely stuck, stop and explain why in plain text.
+
+Be efficient. Prefer batching file writes. Do not re-read files you just wrote. Do not ls the same directory twice in a row.`;
+
+async function runAgentLoop(
+  devboxUrl: string,
+  specMd: string,
+  manifestSha: string,
+  emit: (event: string, data: unknown) => void,
+): Promise<{ iterations: number; final_text: string; duration_ms: number }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error('ANTHROPIC_API_KEY not set on manifex-wip');
+  const client = new Anthropic({ apiKey });
+
+  // Seed: stash the spec on the devbox so Claude can read it with read_file
+  // instead of us sending 42KB of text in every turn's context.
+  const base = devboxUrl.replace(/\/+$/, '');
+  await fetch(`${base}/__write`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path: '.manifex/spec.md', content: specMd }),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  const messages: Anthropic.Messages.MessageParam[] = [
+    {
+      role: 'user',
+      content: `A Manifex documentation spec has been placed at /app/workspace/.manifex/spec.md. Your goal: bring the code in /app/workspace into alignment with that spec. If the workspace is empty, create the project from scratch. If it already has code, make incremental edits. Start the dev server in the background and write its port to /app/workspace/.manifex-port. When done, respond with a one-sentence BUILD_SUMMARY.\n\nmanifest_sha: ${manifestSha}`,
+    },
+  ];
+
+  const MAX_ITERATIONS = 60;
+  const started = Date.now();
+  let iteration = 0;
+  let finalText = '';
+
+  while (iteration < MAX_ITERATIONS) {
+    iteration++;
+    emit('iteration', { n: iteration });
+
+    const resp = await client.messages.create({
+      model: 'claude-sonnet-4-5-20250929',
+      max_tokens: 16000,
+      system: SYSTEM_PROMPT,
+      tools: TOOLS,
+      messages,
+    });
+
+    // Capture any assistant text blocks for the log panel.
+    const textBlocks = resp.content.filter(b => b.type === 'text') as Array<{ type: 'text'; text: string }>;
+    if (textBlocks.length > 0) {
+      const joined = textBlocks.map(b => b.text).join('\n');
+      if (joined.trim()) {
+        emit('assistant_text', { iteration, text: joined });
+        finalText = joined;
+      }
+    }
+
+    if (resp.stop_reason === 'end_turn' || resp.stop_reason === 'stop_sequence') {
+      // Claude is done.
+      break;
+    }
+
+    if (resp.stop_reason !== 'tool_use') {
+      emit('error', { message: `unexpected stop_reason: ${resp.stop_reason}`, stage: 'loop' });
+      break;
+    }
+
+    // Execute every tool_use block, collect tool_results in one user message.
+    const toolUses = resp.content.filter(b => b.type === 'tool_use') as Array<{
+      type: 'tool_use';
+      id: string;
+      name: string;
+      input: unknown;
+    }>;
+    const toolResultsContent: Anthropic.Messages.ToolResultBlockParam[] = [];
+    for (const tu of toolUses) {
+      emit('tool_use', { id: tu.id, iteration, name: tu.name, input: tu.input });
+      const result = await execTool(devboxUrl, tu.name, tu.input);
+      emit('tool_result', { id: tu.id, iteration, ok: result.ok, summary: result.summary });
+      toolResultsContent.push({
+        type: 'tool_result',
+        tool_use_id: tu.id,
+        content: result.content,
+        is_error: !result.ok,
+      });
+    }
+
+    // Append the assistant turn + tool results and loop.
+    messages.push({ role: 'assistant', content: resp.content });
+    messages.push({ role: 'user', content: toolResultsContent });
+  }
+
+  return {
+    iterations: iteration,
+    final_text: finalText || '(no summary)',
+    duration_ms: Date.now() - started,
+  };
+}
+
 export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const session = await getSession(id);
-  if (!session) return NextResponse.json({ error: 'not found' }, { status: 404 });
-
-  // Same defensive gate as /render used to have — don't build while a
-  // non-draft proposal is open, the user would silently get a build of
-  // stale content.
+  if (!session) {
+    return new Response(JSON.stringify({ error: 'not found' }), { status: 404, headers: { 'content-type': 'application/json' } });
+  }
   if (session.pending_attempt && !session.pending_attempt.draft) {
-    return NextResponse.json({
+    return new Response(JSON.stringify({
       error: 'You have proposed changes waiting. Click "Looks good" to accept them before building.',
       reason: 'pending_not_accepted',
-    }, { status: 409 });
+    }), { status: 409, headers: { 'content-type': 'application/json' } });
   }
-
   const devbox = getDevbox(session);
   if (!devbox) {
-    return NextResponse.json({
-      error: 'This session has no devbox attached yet. The heartbeat normally provisions one within a few seconds of opening the editor.',
+    return new Response(JSON.stringify({
+      error: 'No devbox attached. Heartbeat should provision one within a few seconds of opening the editor.',
       reason: 'no_devbox',
-    }, { status: 409 });
+    }), { status: 409, headers: { 'content-type': 'application/json' } });
   }
 
   const spec_md = concatenateSpec(session.manifest_state);
   const manifest_sha = session.manifest_state.sha;
-  const goal = `Bring the code in /app/workspace into alignment with the latest Manifex spec (doc bundle at .manifex/spec.md). If /app/workspace is empty, create the project from scratch per the Environment page. If there's existing code, make the smallest set of edits needed to match the spec. Stop by starting the dev server in the background and writing its port to /app/workspace/.manifex-port.`;
 
-  const base = devbox.url.replace(/\/+$/, '');
-  return NextResponse.json({
-    manifest_sha,
-    spec_md,
-    goal,
-    devbox_url: devbox.url,
-    run_url: `${base}/__run`,
-    build_log_url: `${base}/__logs`,
-    health_url: `${base}/__health`,
-    events_url: `${base}/__events`,
+  const stream = new ReadableStream({
+    async start(controller) {
+      const emit = (event: string, data: unknown) => {
+        try { controller.enqueue(sseEvent(event, data)); } catch {}
+      };
+      emit('start', { manifest_sha, devbox_url: devbox.url, spec_bytes: spec_md.length });
+      try {
+        const result = await runAgentLoop(devbox.url, spec_md, manifest_sha, emit);
+        emit('done', result);
+      } catch (e: any) {
+        emit('error', { message: e?.message || String(e), stage: 'agent' });
+      } finally {
+        try { controller.close(); } catch {}
+      }
+    },
+  });
+
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache, no-transform',
+      'x-accel-buffering': 'no',
+    },
   });
 }
