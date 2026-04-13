@@ -1,7 +1,8 @@
 // Supabase-backed store for Manifex.
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex, ManifexTeam, ManifexTeamMember, TeamRole, BuildHistoryEntry, BuildHistoryAction, PendingProposal, ProposalStatus, ProposalComment } from './types';
+import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex, ManifexTeam, ManifexTeamMember, TeamRole, BuildHistoryEntry, BuildHistoryAction, PendingProposal, ProposalStatus, ProposalComment, TeamInvite } from './types';
+import { randomBytes } from 'crypto';
 import { LOCAL_DEV_TEAM, LOCAL_DEV_USER, migrateManifestState } from './types';
 import { sha256 } from './crypto';
 
@@ -626,6 +627,151 @@ export async function listProposalComments(proposalId: string): Promise<Proposal
     section_slug: row.section_slug ?? null,
     created_at: row.created_at,
   }));
+}
+
+// ────────────────────────────────────────────────────────────
+// Team invites (Phase 2)
+// ────────────────────────────────────────────────────────────
+
+function invitesTableMissing(err: { message?: string; code?: string } | null | undefined): boolean {
+  if (!err) return false;
+  if (err.code === '42P01' || err.code === 'PGRST205') return true;
+  const m = err.message || '';
+  return /manifex_team_invites/i.test(m) && /(does not exist|schema cache|Could not find)/i.test(m);
+}
+
+function rowToInvite(row: any): TeamInvite {
+  return {
+    id: row.id,
+    team_id: row.team_id,
+    token: row.token,
+    role_on_join: (row.role_on_join as TeamRole) || 'editor',
+    created_by: row.created_by,
+    created_at: row.created_at,
+    expires_at: row.expires_at ?? null,
+    max_uses: row.max_uses ?? null,
+    uses: row.uses ?? 0,
+    revoked_at: row.revoked_at ?? null,
+  };
+}
+
+function newInviteToken(): string {
+  // 24 url-safe bytes — plenty of entropy, no special chars to escape.
+  return randomBytes(24).toString('base64url');
+}
+
+export async function createTeamInvite(input: {
+  team_id: string;
+  created_by: string;
+  role_on_join?: TeamRole;
+  expires_at?: string | null;
+  max_uses?: number | null;
+}): Promise<TeamInvite | null> {
+  const { data, error } = await client()
+    .from('manifex_team_invites')
+    .insert({
+      team_id: input.team_id,
+      token: newInviteToken(),
+      role_on_join: input.role_on_join || 'editor',
+      created_by: input.created_by,
+      expires_at: input.expires_at ?? null,
+      max_uses: input.max_uses ?? null,
+    })
+    .select('*')
+    .single();
+  if (error) {
+    if (invitesTableMissing(error)) return null;
+    throw new Error(`createTeamInvite: ${error.message}`);
+  }
+  return rowToInvite(data);
+}
+
+export async function getTeamInviteByToken(token: string): Promise<TeamInvite | null> {
+  const { data, error } = await client()
+    .from('manifex_team_invites')
+    .select('*')
+    .eq('token', token)
+    .maybeSingle();
+  if (error) {
+    if (invitesTableMissing(error)) return null;
+    throw new Error(`getTeamInviteByToken: ${error.message}`);
+  }
+  return data ? rowToInvite(data) : null;
+}
+
+export async function listTeamInvites(teamId: string): Promise<TeamInvite[]> {
+  const { data, error } = await client()
+    .from('manifex_team_invites')
+    .select('*')
+    .eq('team_id', teamId)
+    .order('created_at', { ascending: false });
+  if (error) {
+    if (invitesTableMissing(error)) return [];
+    console.warn('listTeamInvites failed:', error.message);
+    return [];
+  }
+  return (data || []).map(rowToInvite);
+}
+
+export interface InviteRedemption {
+  ok: true;
+  team_id: string;
+  role: TeamRole;
+}
+
+export interface InviteRedemptionError {
+  ok: false;
+  reason: 'not_found' | 'expired' | 'exhausted' | 'revoked' | 'already_member' | 'tables_missing' | 'unknown';
+  message: string;
+}
+
+export async function redeemTeamInvite(token: string, userId: string): Promise<InviteRedemption | InviteRedemptionError> {
+  const invite = await getTeamInviteByToken(token);
+  if (!invite) return { ok: false, reason: 'not_found', message: 'invite link not found' };
+  if (invite.revoked_at) return { ok: false, reason: 'revoked', message: 'invite link was revoked' };
+  if (invite.expires_at && new Date(invite.expires_at).getTime() < Date.now()) {
+    return { ok: false, reason: 'expired', message: 'invite link expired' };
+  }
+  if (invite.max_uses !== null && invite.uses >= invite.max_uses) {
+    return { ok: false, reason: 'exhausted', message: 'invite link is fully used' };
+  }
+
+  // Already a member?
+  const existingTeams = await listTeamIdsForUser(userId);
+  if (existingTeams.includes(invite.team_id)) {
+    return { ok: false, reason: 'already_member', message: 'you are already on this team' };
+  }
+
+  // Insert membership.
+  const { error: memberErr } = await client()
+    .from('manifex_team_members')
+    .insert({ team_id: invite.team_id, user_id: userId, role: invite.role_on_join });
+  if (memberErr) {
+    if (teamsTableMissing(memberErr)) return { ok: false, reason: 'tables_missing', message: 'team tables not yet migrated' };
+    return { ok: false, reason: 'unknown', message: memberErr.message };
+  }
+
+  // Bump use counter — best-effort, never fail the redeem on a counter
+  // update error.
+  await client()
+    .from('manifex_team_invites')
+    .update({ uses: invite.uses + 1 })
+    .eq('id', invite.id)
+    .then(() => undefined, () => undefined);
+
+  return { ok: true, team_id: invite.team_id, role: invite.role_on_join };
+}
+
+export async function revokeTeamInvite(id: string): Promise<boolean> {
+  const { error } = await client()
+    .from('manifex_team_invites')
+    .update({ revoked_at: new Date().toISOString() })
+    .eq('id', id);
+  if (error) {
+    if (invitesTableMissing(error)) return false;
+    throw new Error(`revokeTeamInvite: ${error.message}`);
+  }
+  return true;
 }
 
 export async function createProposalComment(input: {

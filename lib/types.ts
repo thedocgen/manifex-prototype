@@ -129,6 +129,19 @@ export interface ProposalComment {
   created_at: string;
 }
 
+export interface TeamInvite {
+  id: string;
+  team_id: string;
+  token: string;
+  role_on_join: TeamRole;
+  created_by: string;
+  created_at: string;
+  expires_at: string | null;
+  max_uses: number | null;
+  uses: number;
+  revoked_at: string | null;
+}
+
 export interface BuildHistoryEntry {
   id: string;
   session_id: string;
