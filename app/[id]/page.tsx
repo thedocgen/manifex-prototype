@@ -87,9 +87,13 @@ function TreeItem({ node, activePath, changedPaths, onSelect, depth = 0 }: {
   const hasChildren = node.children && node.children.length > 0;
   const isActive = node.path === activePath;
   const isChanged = changedPaths.has(node.path);
+  // Meta entries (path starts with "_") are session-scoped pages like Build
+  // History — render them visually distinct so users don't expect them to
+  // behave like editable doc pages.
+  const isMeta = node.path.startsWith('_');
 
   return (
-    <div>
+    <div style={isMeta ? { borderTop: '1px solid var(--border)', marginTop: '8px', paddingTop: '6px' } : undefined}>
       <button
         onClick={() => onSelect(node.path)}
         style={{
@@ -104,8 +108,9 @@ function TreeItem({ node, activePath, changedPaths, onSelect, depth = 0 }: {
           borderLeft: isActive ? '3px solid var(--accent)' : '3px solid transparent',
           borderRadius: '0 6px 6px 0',
           background: isActive ? 'var(--accent-soft)' : 'transparent',
-          color: isActive ? 'var(--accent)' : 'var(--text)',
+          color: isActive ? 'var(--accent)' : (isMeta ? 'var(--text-dim)' : 'var(--text)'),
           fontWeight: isActive ? 600 : 400,
+          fontStyle: isMeta ? 'italic' : 'normal',
           fontSize: '13px',
           cursor: 'pointer',
           transition: 'all 0.15s ease',
@@ -121,6 +126,7 @@ function TreeItem({ node, activePath, changedPaths, onSelect, depth = 0 }: {
             {expanded ? '▾' : '▸'}
           </span>
         )}
+        {isMeta && <span style={{ fontSize: '11px', color: 'var(--text-dim)', flexShrink: 0 }} aria-hidden="true">⏱</span>}
         <span style={{ flex: 1 }}>{node.title}</span>
         {isChanged && (
           <span style={{
