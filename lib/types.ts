@@ -100,6 +100,22 @@ export const LOCAL_DEV_TEAM = {
 
 export type TeamRole = 'owner' | 'editor' | 'viewer';
 
+export type BuildHistoryAction = 'accept' | 'undo' | 'redo' | 'forget' | 'retry';
+
+export interface BuildHistoryEntry {
+  id: string;
+  session_id: string;
+  team_id: string | null;
+  author_id: string;
+  action: BuildHistoryAction;
+  prompt: string | null;
+  diff_summary: string | null;
+  changed_pages: string[] | null;
+  sha_before: string | null;
+  sha_after: string | null;
+  created_at: string;
+}
+
 export interface ManifexTeam {
   id: string;
   name: string;

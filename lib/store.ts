@@ -1,7 +1,7 @@
 // Supabase-backed store for Manifex.
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex, ManifexTeam, ManifexTeamMember, TeamRole } from './types';
+import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex, ManifexTeam, ManifexTeamMember, TeamRole, BuildHistoryEntry, BuildHistoryAction } from './types';
 import { LOCAL_DEV_TEAM, LOCAL_DEV_USER, migrateManifestState } from './types';
 import { sha256 } from './crypto';
 
@@ -421,4 +421,84 @@ export async function ensurePersonalTeam(userId: string): Promise<string | null>
     .insert({ team_id: data.id, user_id: userId, role: 'owner' })
     .then(() => undefined, () => undefined);
   return data.id;
+}
+
+// ────────────────────────────────────────────────────────────
+// Build history (Phase 2)
+// ────────────────────────────────────────────────────────────
+
+function historyTableMissing(err: { message?: string; code?: string } | null | undefined): boolean {
+  if (!err) return false;
+  if (err.code === '42P01' || err.code === 'PGRST205') return true;
+  const m = err.message || '';
+  return (
+    /manifex_build_history/i.test(m) && /(does not exist|schema cache|Could not find)/i.test(m)
+  );
+}
+
+function rowToHistoryEntry(row: any): BuildHistoryEntry {
+  return {
+    id: row.id,
+    session_id: row.session_id,
+    team_id: row.team_id ?? null,
+    author_id: row.author_id,
+    action: row.action,
+    prompt: row.prompt ?? null,
+    diff_summary: row.diff_summary ?? null,
+    changed_pages: row.changed_pages ?? null,
+    sha_before: row.sha_before ?? null,
+    sha_after: row.sha_after ?? null,
+    created_at: row.created_at,
+  };
+}
+
+export async function appendBuildHistory(input: {
+  session_id: string;
+  team_id?: string | null;
+  author_id: string;
+  action: BuildHistoryAction;
+  prompt?: string | null;
+  diff_summary?: string | null;
+  changed_pages?: string[] | null;
+  sha_before?: string | null;
+  sha_after?: string | null;
+}): Promise<BuildHistoryEntry | null> {
+  const row = {
+    session_id: input.session_id,
+    team_id: input.team_id ?? null,
+    author_id: input.author_id,
+    action: input.action,
+    prompt: input.prompt ?? null,
+    diff_summary: input.diff_summary ?? null,
+    changed_pages: input.changed_pages ?? null,
+    sha_before: input.sha_before ?? null,
+    sha_after: input.sha_after ?? null,
+  };
+  const { data, error } = await client()
+    .from('manifex_build_history')
+    .insert(row)
+    .select('*')
+    .single();
+  if (error) {
+    if (historyTableMissing(error)) return null;
+    // Don't break the calling endpoint over a history-write failure — log and continue.
+    console.warn('appendBuildHistory failed:', error.message);
+    return null;
+  }
+  return rowToHistoryEntry(data);
+}
+
+export async function listBuildHistory(sessionId: string, limit = 50): Promise<BuildHistoryEntry[]> {
+  const { data, error } = await client()
+    .from('manifex_build_history')
+    .select('*')
+    .eq('session_id', sessionId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) {
+    if (historyTableMissing(error)) return [];
+    console.warn('listBuildHistory failed:', error.message);
+    return [];
+  }
+  return (data || []).map(rowToHistoryEntry);
 }
