@@ -368,6 +368,17 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       });
       const data = await res.json();
 
+      if (!res.ok) {
+        const errMsg: ConversationMessage = {
+          role: 'assistant',
+          content: data.error || 'Something went wrong while thinking about your request.',
+          timestamp: new Date().toISOString(),
+        };
+        setConversation(prev => [...prev, errMsg]);
+        showToast('error', data.error || 'Request failed');
+        return;
+      }
+
       if (data.response_type === 'question') {
         // LLM asked a question — make conversation prominent
         const assistantMsg: ConversationMessage = {
@@ -399,10 +410,6 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           timestamp: new Date().toISOString(),
         };
         setConversation(prev => [...prev, assistantMsg]);
-      }
-
-      if (!res.ok) {
-        showToast('error', data.error || data.message || 'Something went wrong');
       }
     } catch (e: any) {
       // Error recovery: friendly message in conversation

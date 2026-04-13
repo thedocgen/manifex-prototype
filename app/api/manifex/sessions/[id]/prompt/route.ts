@@ -15,10 +15,36 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
 
   const conversationContext: ConversationMessage[] = body.conversationContext || [];
 
-  const response = await editManifest(session.manifest_state, prompt, {
-    conversationContext: conversationContext.length > 0 ? conversationContext : undefined,
-    image,
-  });
+  let response;
+  try {
+    response = await editManifest(session.manifest_state, prompt, {
+      conversationContext: conversationContext.length > 0 ? conversationContext : undefined,
+      image,
+    });
+  } catch (e: any) {
+    const msg: string = e?.message || 'unknown error';
+    const status: number = e?.status || 500;
+    let userMessage = 'Something went wrong while thinking about your request.';
+    let kind = 'unknown';
+    if (status === 429 || /rate.?limit/i.test(msg)) {
+      kind = 'rate_limit';
+      userMessage = 'The model is rate-limited right now. Try again in a moment.';
+    } else if (status === 401 || /api.?key/i.test(msg)) {
+      kind = 'auth';
+      userMessage = 'The Anthropic API key is missing or invalid. Check ANTHROPIC_API_KEY in .env.local.';
+    } else if (/overload|529/i.test(msg)) {
+      kind = 'overload';
+      userMessage = 'The model is overloaded. Try again in a few seconds.';
+    } else if (/content.?filter|safety/i.test(msg)) {
+      kind = 'content_filter';
+      userMessage = 'The model declined this request. Try rephrasing.';
+    } else if (/timeout|ECONNRESET|fetch/i.test(msg)) {
+      kind = 'network';
+      userMessage = 'Lost connection to the model. Check your internet and try again.';
+    }
+    console.error('[prompt] editManifest failed:', kind, msg);
+    return NextResponse.json({ error: userMessage, kind, detail: msg }, { status });
+  }
 
   if (response.type === 'question') {
     // LLM asked a question — no doc changes, return question for the UI
