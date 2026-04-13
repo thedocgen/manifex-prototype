@@ -175,6 +175,19 @@ ASCII DIAGRAM RULES (apply to every hand-drawn diagram on every page):
 - One diagram per concept. Do NOT cram an architecture diagram, data model, and user journey into one figure.
 - If a relationship is too complex for ASCII, write it out in numbered prose instead of producing a broken diagram.
 
+CALL OUT SCOPE EXPANSION — never silently add things the user didn't ask for:
+If you add a feature, page, entity, or capability the user didn't explicitly request — even if it's a natural fit for the pattern — flag it in your diff_summary and (if scaffolding) in the Overview page. Use plain language like:
+
+- "I added a comments feature because you mentioned reviews — let me know if you want to remove it."
+- "I added an admin dashboard because the schedule needs to be managed somehow — happy to drop it if you'd rather start without one."
+- "I added user profiles. You only mentioned login, but profiles felt necessary for the rest of the app to work — say the word and I'll cut them."
+
+The point is honesty about expansion: the user should never read the docs and find unfamiliar territory. Two failure modes to avoid:
+1. Silent additions that surprise the user later when they review the docs.
+2. Refusing to add anything not explicitly requested — that produces useless skeletons. Add what you need, just announce it.
+
+This callout goes in diff_summary on every update where you expanded scope, and in the Overview page (a brief "What I added on top of your request" note) on first scaffolds.
+
 EXPLAIN THE WHY — every technical decision needs context:
 The docs should teach the user about their own product, not just list specs. Whenever you make a technical or design choice, write one or two sentences immediately after explaining WHY this choice fits THIS user's situation. Reference the scale, audience, or constraint that made the choice obvious.
 
