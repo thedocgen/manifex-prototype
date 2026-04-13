@@ -1229,21 +1229,36 @@ async function emitProjectSection(
     }
   }
 
-  const files = r.input.files || {};
+  const rawFiles = (r.input.files || {}) as Record<string, unknown>;
+  // Coerce: Claude will occasionally emit JSON-shaped files (package.json,
+  // tsconfig.json) as parsed objects instead of strings, ignoring the
+  // additionalProperties: { type: 'string' } hint. Stringify those back
+  // into file contents rather than fail the whole compile. Numbers/booleans
+  // get String()'d for symmetry.
+  const files: ProjectFiles = {};
+  for (const [p, raw] of Object.entries(rawFiles)) {
+    // Path safety first — reject before we touch content.
+    if (p.startsWith('/') || p.includes('..') || p.startsWith('__manifex/')) {
+      throw new Error(`[${label}] illegal file path: ${p}`);
+    }
+    if (typeof raw === 'string') {
+      files[p] = raw;
+    } else if (raw && typeof raw === 'object') {
+      try {
+        files[p] = JSON.stringify(raw, null, 2) + '\n';
+      } catch (e: any) {
+        throw new Error(`[${label}] file ${p} had non-string object content that failed to stringify: ${e?.message || e}`);
+      }
+    } else if (raw != null) {
+      files[p] = String(raw);
+    } else {
+      throw new Error(`[${label}] file ${p} has null/undefined content`);
+    }
+  }
   const out: ProjectSectionResult = { files };
   if (typeof r.input.setup === 'string') out.setup = r.input.setup;
   if (typeof r.input.run === 'string') out.run = r.input.run;
   if (typeof r.input.port === 'number' && Number.isFinite(r.input.port)) out.port = r.input.port;
-
-  // Sanity-check paths: reject leading-slash, '..', or reserved __manifex/ keys.
-  for (const p of Object.keys(files)) {
-    if (p.startsWith('/') || p.includes('..') || p.startsWith('__manifex/')) {
-      throw new Error(`[${label}] illegal file path: ${p}`);
-    }
-    if (typeof files[p] !== 'string') {
-      throw new Error(`[${label}] file ${p} has non-string content`);
-    }
-  }
 
   if (label === 'INFRA' && (!out.setup || !out.run || !out.port)) {
     throw new Error(`[${label}] incomplete infra payload: setup=${!!out.setup}, run=${!!out.run}, port=${out.port}`);
