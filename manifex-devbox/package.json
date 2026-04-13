@@ -1,0 +1,10 @@
+{
+  "name": "manifex-devbox",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Per-session HTTP server that serves the compiled Manifex app + reloads on /__sync.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

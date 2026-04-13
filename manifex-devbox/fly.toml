@@ -1,0 +1,29 @@
+# Image-build app for the Manifex devbox image.
+#
+# This app exists ONLY to push an image to the Fly registry at
+# registry.fly.io/manifex-devbox-image:latest. Per-session devbox apps
+# (manifex-app-<session-id8>) reference this image directly via the
+# Machines API instead of running their own builds.
+#
+# Deploy from manifex-prototype/manifex-devbox/:
+#   flyctl deploy --build-only --push --image-label latest -a manifex-devbox-image
+
+app = "manifex-devbox-image"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
