@@ -7,7 +7,7 @@ import { renderDiagramMarkers } from './diagram';
 import type { CodexFiles, CompiledCodex, ManifestState, DocPage, TreeNode, Question, ConversationMessage } from './types';
 import { serializePages } from './types';
 
-const COMPILER_VERSION = 'manifex-claude-sonnet-4-v4-behavior-tests';
+const COMPILER_VERSION = 'manifex-claude-sonnet-4-v5-contract-first';
 const MODEL = 'claude-sonnet-4-5-20250929';
 
 let _client: Anthropic | null = null;
@@ -589,58 +589,209 @@ CODE RULES:
   code — assume document is fully loaded when tests run.${secretsSection}`;
 }
 
+// Role-specific "what to emit" sections appended to the shared compiler
+// system prompt for each parallel call. Every call still gets the full
+// design system, quality bar, banned emojis, time-based features, tests
+// guidance, etc. from buildCompilerSystem — these strings just tell each
+// call which single file to emit and which tool to use.
+
+const HTML_ROLE = `
+YOUR TASK:
+Emit ONLY the index.html file. Call the emit_file tool with the content.
+
+- Complete HTML5 document (doctype, html, head, body).
+- Include <script src="https://cdn.tailwindcss.com"></script> in <head>.
+- Include the Inter font <link> from Google Fonts.
+- Do NOT inline styles or scripts — the runtime inlines styles.css and app.js for you. Reference them as <link rel="stylesheet" href="styles.css"> and <script src="app.js"></script>.
+- Annotate major sections with data-doc-page and data-doc-section so the docs-to-preview bridge can map them.
+- Every interactive element (button, form field, row, nav link) MUST carry stable data-action / data-role / data-field attributes. The app.js and tests.js calls will target these same attributes without coordinating with you — agree by following the docs spec literally.
+- Use kebab-case for all data-* values and CSS class names.
+- Do NOT invent features not in the docs. If the docs don't mention it, don't render it.`;
+
+const CSS_ROLE = `
+YOUR TASK:
+Emit ONLY the styles.css file. Call the emit_file tool with the content.
+
+- Almost all styling is Tailwind utility classes in the HTML. This file is for:
+  - A minimal :root color variable block if the Styles doc page defines a custom palette.
+  - @keyframes for custom animations the Styles doc page describes.
+  - Rare cases Tailwind cannot express (e.g. backdrop filters, container queries).
+- Do NOT duplicate Tailwind utilities. Do NOT emit a framework-sized stylesheet.
+- If the app has no custom animations or palette variables, a near-empty file (just a comment) is correct.`;
+
+const JS_ROLE = `
+YOUR TASK:
+Emit ONLY the app.js file. Call the emit_file tool with the content.
+
+- Vanilla JavaScript, no framework, no build step, no imports.
+- An ELEMENT CONTRACT section below lists the data-action / data-role / data-field values the already-emitted index.html uses for STATIC elements (top-level navigation, add-form buttons, etc).
+- For STATIC elements (anything that exists in the rendered HTML at page load), you MUST use only the contract values. Do not invent new data-action values for buttons that should exist in the static shell — the HTML didn't render them, so neither should you wire them.
+- For DYNAMIC elements (rows in a CRUD list, modal contents, items in a results grid that JS renders via innerHTML or createElement), you ARE expected to invent new data-action / data-role values. Each row in a list usually needs its own per-row actions like 'edit-X', 'delete-X', 'check-X' — these legitimately do not appear in the static HTML because they're rendered per-row by your code. The rule for these:
+  - Whenever you render a dynamic element with a data-action="foo", you MUST also have an event handler that checks for data-action === "foo" and runs the right behavior. Render-and-handle in the same file.
+  - Use document-level event delegation: document.addEventListener('click', e => { const action = e.target.closest('[data-action]')?.dataset.action; if (action === 'edit-X') ... }).
+- Implement the behavior described in the docs: CRUD, navigation, stats, timers, forms, validation.
+- Use localStorage for persistence when the Data and Storage page describes a browser-local model.
+- Wrap the whole thing in a DOMContentLoaded handler.
+- Be deterministic: identical input should produce equivalent output.`;
+
+const TESTS_ROLE = `
+YOUR TASK:
+Emit ONLY the tests.js file. Call the emit_file tool with the content.
+
+- Declare window.__manifexTests as an array of { name, category, fn } per the TESTS section above.
+- Aim for 60-80% behavior tests for any non-static app.
+- An ELEMENT CONTRACT section below lists the data-action / data-role / data-field values the static index.html uses. For STATIC element tests, use those exact values.
+- For DYNAMIC elements (rows in a list, modal items rendered by JS), the contract won't list them. Tests targeting dynamic elements should drive the UI through the static contract first (e.g. fill the add-form, click add), then query for the resulting dynamic elements by their structural position or by the data-role pattern the docs describe. Don't invent a static selector that doesn't exist; do walk through the actual user flow.
+- Include a top-level "function assert(c, m) { if (!c) throw new Error(m); }" helper.
+- Use window.__manifexSleep / __manifexClick / __manifexType / __manifexQuery / __manifexQueryAll for UI driving.
+- Do NOT emit top-level await or DOM-not-ready code. Assume document is fully loaded when tests run.`;
+
+const EMIT_FILE_TOOL = {
+  name: 'emit_file',
+  description: 'Emit the requested file as a single string.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      content: { type: 'string' as const, description: 'The full file content.' },
+    },
+    required: ['content' as const],
+  },
+};
+
+async function emitOneFile(
+  label: string,
+  sharedSystem: string,
+  roleSystem: string,
+  serialized: string,
+  maxTokens: number,
+  extraUserContext?: string,
+): Promise<string> {
+  // Element contract goes BEFORE the docs (high recency = high attention).
+  // The docs are huge and would otherwise drown out a short contract block
+  // tacked onto the end. The hard-rule wrapper makes the constraint absolute.
+  const userContent = extraUserContext
+    ? `${extraUserContext}\n\nThe contract above is ABSOLUTE for the file you're about to emit. Even if the documentation below describes behavior for elements not in the contract, you may NOT use selectors outside the contract. If a doc-described feature has no contract attribute, skip it — the user will iterate.\n\nDOCUMENTATION PAGES (read for context, but the contract overrides):\n\n${serialized}\n\nEmit the ${label} file now by calling emit_file. Every selector you write MUST appear in the contract above.`
+    : `DOCUMENTATION PAGES:\n\n${serialized}\n\nEmit the ${label} file now by calling emit_file.`;
+  const resp = await client().messages.create({
+    model: MODEL,
+    max_tokens: maxTokens,
+    temperature: 0,
+    system: sharedSystem + '\n' + roleSystem,
+    tools: [EMIT_FILE_TOOL],
+    tool_choice: { type: 'tool', name: 'emit_file' },
+    messages: [
+      { role: 'user', content: userContent },
+    ],
+  });
+
+  const toolUse = resp.content.find(b => b.type === 'tool_use');
+  if (!toolUse || toolUse.type !== 'tool_use') {
+    throw new Error(`[${label}] LLM did not call emit_file (stop_reason: ${resp.stop_reason})`);
+  }
+  const input = toolUse.input as { content?: string };
+  if (typeof input.content !== 'string' || input.content.length === 0) {
+    throw new Error(`[${label}] emit_file returned empty content (stop_reason: ${resp.stop_reason})`);
+  }
+  return input.content;
+}
+
+// Scan the emitted HTML for data-action / data-role / data-field values
+// so the JS and tests calls can target the EXACT same attribute set the
+// HTML renders, eliminating inter-file drift without a coordination round.
+function extractElementContract(html: string): string {
+  const pick = (attr: string): string[] => {
+    const re = new RegExp(`${attr}=[\"']([^\"']+)[\"']`, 'g');
+    const values = new Set<string>();
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(html))) values.add(m[1]);
+    return Array.from(values).sort();
+  };
+  const actions = pick('data-action');
+  const roles = pick('data-role');
+  const fields = pick('data-field');
+  const pages = pick('data-doc-page');
+  const lines: string[] = ['ELEMENT CONTRACT (derived from the already-emitted index.html):'];
+  lines.push(`- data-action values (${actions.length}): ${actions.length > 0 ? actions.join(', ') : '(none)'}`);
+  lines.push(`- data-role values   (${roles.length}): ${roles.length > 0 ? roles.join(', ') : '(none)'}`);
+  lines.push(`- data-field values  (${fields.length}): ${fields.length > 0 ? fields.join(', ') : '(none)'}`);
+  lines.push(`- data-doc-page values (${pages.length}): ${pages.length > 0 ? pages.join(', ') : '(none)'}`);
+  lines.push('Every selector in the file you emit MUST use only values from these lists. Do not invent new ones.');
+  return lines.join('\n');
+}
+
+function manifestHasTestsPage(state: ManifestState): boolean {
+  return Object.keys(state.pages).some(k => /^tests?$/.test(k));
+}
+
 export async function compileManifestToCodex(
   state: ManifestState,
   secrets?: { [key: string]: string }
 ): Promise<CompiledCodex> {
   const serialized = serializePages(state);
-  const systemPrompt = buildCompilerSystem(state, secrets);
+  const sharedSystem = buildCompilerSystem(state, secrets);
+  const needsTests = manifestHasTestsPage(state);
 
-  const resp = await client().messages.create({
-    model: MODEL,
-    // 21000 stays under the SDK's non-streaming budget cap (above that,
-    // the TS SDK refuses the request and demands streaming). Keeps
-    // headroom for index.html + styles.css + app.js + optional tests.js.
-    max_tokens: 21000,
-    temperature: 0,
-    system: systemPrompt,
-    tools: [
-      {
-        name: 'emit_codex',
-        description: 'Emit the compiled codex as three or four files.',
-        input_schema: {
-          type: 'object' as const,
-          properties: {
-            index_html: { type: 'string' as const, description: 'Complete HTML5 document.' },
-            styles_css: { type: 'string' as const, description: 'CSS for the app.' },
-            app_js: { type: 'string' as const, description: 'Application JavaScript.' },
-            tests_js: { type: 'string' as const, description: 'JavaScript test functions that validate the compiled app matches the documentation. Each test checks DOM structure, content, or styling.' },
-          },
-          required: ['index_html' as const, 'styles_css' as const, 'app_js' as const],
-        },
-      },
-    ],
-    tool_choice: { type: 'tool', name: 'emit_codex' },
-    messages: [
-      { role: 'user', content: `DOCUMENTATION PAGES:\n\n${serialized}\n\nCompile this into a working web app. Call the emit_codex tool with the three files.` },
-    ],
-  });
+  // Two-phase pipelined compile with tests on the slow path:
+  //   Phase 1: index.html + styles.css in parallel (CSS doesn't need HTML).
+  //   Phase 2: app.js, given HTML's exact data-action / data-role /
+  //            data-field / data-doc-page values as an explicit ELEMENT
+  //            CONTRACT so it targets the same selectors the HTML
+  //            actually rendered.
+  //
+  // Tests.js is NOT on the critical path — it runs in the background
+  // after phase 2 completes and updates the compilation cache when
+  // ready. The preview is usable without tests; tests become available
+  // on the next render of the same manifest sha (cached) or via a
+  // future broadcast refresh.
+  //
+  // Total time to usable preview = (max HTML, CSS) + JS — ~90s typical,
+  // down from 140-240s serial. A 1.6-2.7x speedup on the UX-critical
+  // path.
+  const started = Date.now();
 
-  const toolUse = resp.content.find(b => b.type === 'tool_use');
-  if (!toolUse || toolUse.type !== 'tool_use') throw new Error('LLM did not call emit_codex');
+  const [htmlContent, cssContent] = await Promise.all([
+    emitOneFile('index.html', sharedSystem, HTML_ROLE, serialized, 12000),
+    emitOneFile('styles.css', sharedSystem, CSS_ROLE, serialized, 4000),
+  ]);
+  const phase1Ms = Date.now() - started;
 
-  const input = toolUse.input as { index_html?: string; styles_css?: string; app_js?: string; tests_js?: string };
-  const missing: string[] = [];
-  if (!input.index_html) missing.push('index_html');
-  if (!input.styles_css) missing.push('styles_css');
-  if (!input.app_js) missing.push('app_js');
-  if (missing.length > 0) {
-    throw new Error(`Compiler missing keys: ${missing.join(', ')} (present: ${Object.keys(input).join(', ') || 'none'}; stop_reason: ${resp.stop_reason})`);
-  }
+  const contract = extractElementContract(htmlContent);
+  const jsContent = await emitOneFile('app.js', sharedSystem, JS_ROLE, serialized, 12000, contract);
+  const phase2Ms = Date.now() - started - phase1Ms;
 
-  const files: CodexFiles = { 'index.html': input.index_html!, 'styles.css': input.styles_css!, 'app.js': input.app_js! };
-  if (input.tests_js) {
-    files['tests.js'] = input.tests_js;
+  const files: CodexFiles = {
+    'index.html': htmlContent,
+    'styles.css': cssContent,
+    'app.js': jsContent,
+  };
+  const totalMs = Date.now() - started;
+  console.log(`[compile] critical-path compile finished in ${totalMs}ms (phase1 ${phase1Ms}ms, phase2 ${phase2Ms}ms)`);
+
+  // Background-phase tests.js generation. Kicked off AFTER we've assembled
+  // the critical-path files but BEFORE we return. We intentionally do
+  // NOT await — the caller gets the preview-ready codex immediately and
+  // tests fill in asynchronously. The cache gets updated once tests
+  // land so subsequent renders of the same manifest_sha include them.
+  if (needsTests) {
+    (async () => {
+      try {
+        const testsStarted = Date.now();
+        const testsContent = await emitOneFile('tests.js', sharedSystem, TESTS_ROLE, serialized, 14000, contract);
+        const testsMs = Date.now() - testsStarted;
+        console.log(`[compile] background tests.js finished in ${testsMs}ms (${testsContent.length} bytes)`);
+        // Update the cache entry with the full file set including tests.
+        const updatedFiles: CodexFiles = { ...files, 'tests.js': testsContent };
+        const updatedCodex: CompiledCodex = {
+          files: updatedFiles,
+          codex_sha: sha256(JSON.stringify(updatedFiles)),
+          compiler_version: COMPILER_VERSION,
+        };
+        const { putCachedCompilation } = await import('./store');
+        await putCachedCompilation(state.sha, COMPILER_VERSION, updatedCodex);
+      } catch (e: any) {
+        console.error(`[compile] background tests.js failed:`, e?.message || String(e));
+      }
+    })();
   }
 
   return {
