@@ -13,6 +13,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const image: { base64: string; media_type: string } | undefined = body.image;
   if (!prompt && !image) return NextResponse.json({ error: 'prompt or image required' }, { status: 400 });
 
+  // Optimistic concurrency: if the client tells us which manifest sha they
+  // were looking at, refuse to apply when someone else has moved the
+  // session forward. Without expected_sha we trust the caller (legacy clients).
+  const expectedSha: string | undefined = body.expected_sha;
+  if (expectedSha && expectedSha !== session.manifest_state.sha) {
+    return NextResponse.json({
+      error: 'The docs have changed since you loaded them. Refresh to see the latest, then try again.',
+      kind: 'sha_conflict',
+      current_sha: session.manifest_state.sha,
+      expected_sha: expectedSha,
+      session,
+    }, { status: 409 });
+  }
+
   const conversationContext: ConversationMessage[] = body.conversationContext || [];
 
   let response;

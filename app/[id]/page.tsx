@@ -432,6 +432,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         body: JSON.stringify({
           prompt: p,
           conversationContext: recentContext,
+          expected_sha: session?.manifest_state?.sha,
           ...(pendingFile && (pendingFile.type === 'image' || pendingFile.type === 'pdf') && pendingFile.base64 ? { image: { base64: pendingFile.base64, media_type: pendingFile.mediaType } } : {}),
         }),
       });
@@ -449,6 +450,14 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       setStatusMsg('');
 
       if (!res.ok) {
+        // Sha conflict: refresh local session from the server's snapshot so
+        // the user sees what changed, and tell them to retry.
+        if (data.kind === 'sha_conflict' && data.session) {
+          setSession(data.session);
+          if (data.session.manifest_state?.tree?.length > 0 && !data.session.manifest_state.pages[activePage]) {
+            setActivePage(data.session.manifest_state.tree[0].path);
+          }
+        }
         const errMsg: ConversationMessage = {
           role: 'assistant',
           content: data.error || 'Something went wrong while thinking about your request.',
