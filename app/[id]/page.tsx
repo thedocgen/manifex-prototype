@@ -1089,12 +1089,14 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
               </div>
             ) : (
               <div style={{ padding: '60px 32px', textAlign: 'center' }}>
-                {busy ? (
+                {(busy || compiling) ? (
                   <div style={{ color: 'var(--text-muted)' }}>
                     <div className="mx-typing-dots" style={{ justifyContent: 'center', marginBottom: '16px' }}>
                       <span /><span /><span />
                     </div>
-                    <p style={{ fontSize: '16px', margin: 0 }}>Your app is being created…</p>
+                    <p style={{ fontSize: '16px', margin: 0 }}>
+                      {compiling ? 'Building your app…' : 'Your app is being created…'}
+                    </p>
                   </div>
                 ) : (
                   <div>
