@@ -20,9 +20,33 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'session not found' }, { status: 404 });
 
-  const existing: DevboxState | null = (session.manifest_state as any)?.devbox || null;
+  let existing: DevboxState | null = (session.manifest_state as any)?.devbox || null;
   if (existing?.url && existing?.machine_id) {
-    return NextResponse.json({ devbox: existing, created: false });
+    // Phase 2B Path A: verify the referenced Fly machine still exists
+    // before handing the stale state back. Manual deletes, failed
+    // destroys, and cross-environment dev moves can leave stranded
+    // pointers; self-healing here keeps the editor from trying to
+    // start a machine that Fly has already forgotten about.
+    const ok = await (async () => {
+      try {
+        const { getMachineState } = await import('@/lib/devbox');
+        const state = await getMachineState(existing!.app_name, existing!.machine_id);
+        return state !== 'missing';
+      } catch {
+        return false;
+      }
+    })();
+    if (ok) {
+      return NextResponse.json({ devbox: existing, created: false });
+    }
+    // Clear the stale pointer so createDevbox(sessionId) below makes a
+    // fresh app + machine rather than trying to reuse an address that
+    // resolves to nothing.
+    console.warn(`[devbox] stale pointer for session ${id}, rebuilding`);
+    const cleared = { ...session.manifest_state };
+    delete (cleared as any).devbox;
+    await updateSession(id, { manifest_state: cleared });
+    existing = null;
   }
 
   const result = await createDevbox(id);

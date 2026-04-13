@@ -357,6 +357,24 @@ export async function syncDevbox(url: string, html: string): Promise<{ ok: boole
 }
 
 /**
+ * Query the Fly Machines API for a specific machine's lifecycle state.
+ * Returns 'missing' when the app or machine is 404, 'stopped' / 'started'
+ * / other strings for concrete states. Used by the /devbox POST handler
+ * to verify that a persisted devbox pointer still resolves before it
+ * hands the pointer back to the client.
+ */
+export async function getMachineState(appName: string, machineId: string): Promise<string> {
+  const res = await flyFetch(`/apps/${encodeURIComponent(appName)}/machines/${encodeURIComponent(machineId)}`, { method: 'GET' });
+  if (res.status === 404) return 'missing';
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`getMachineState(${appName}/${machineId}) failed: ${res.status} ${text}`);
+  }
+  const data = await res.json().catch(() => ({}));
+  return typeof data?.state === 'string' ? data.state : 'unknown';
+}
+
+/**
  * Start a stopped machine. Idempotent — returns successfully when the
  * machine is already running. Part of the Phase 2B Path A lifecycle:
  * when a user's editor tab becomes visible, the server starts the
