@@ -210,6 +210,28 @@ input:focus, textarea:focus {
   padding: 2px 6px;
   border-radius: 4px;
 }
+.mx-md-pre {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.45;
+  background: rgba(0, 0, 0, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin: 0 0 16px;
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 4;
+  color: var(--text);
+}
+.mx-md-pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+  font-family: inherit;
+  white-space: pre;
+}
 
 /* Diff highlighting in markdown */
 .mx-md .add {

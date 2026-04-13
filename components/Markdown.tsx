@@ -139,6 +139,8 @@ export function Markdown({ content, diffAgainst, searchTerm, activeMatchIndex, o
 
   const blocks: React.ReactNode[] = [];
   let listBuffer: { node: React.ReactNode; status: Line['status'] }[] = [];
+  let codeBuffer: string[] | null = null;  // null = not in code block
+  let codeLanguage = '';
   let key = 0;
 
   const flushList = () => {
@@ -155,16 +157,55 @@ export function Markdown({ content, diffAgainst, searchTerm, activeMatchIndex, o
     listBuffer = [];
   };
 
+  const flushCode = () => {
+    if (codeBuffer === null) return;
+    blocks.push(
+      <pre key={`pre${key++}`} className="mx-md-pre" data-lang={codeLanguage || undefined}>
+        <code>{codeBuffer.join('\n')}</code>
+      </pre>
+    );
+    codeBuffer = null;
+    codeLanguage = '';
+  };
+
+  // Code-fence aware line iteration. A line whose trimmed text starts with
+  // ``` opens (or closes) a fenced block. Everything between is preserved
+  // verbatim as a single <pre><code> element so ASCII diagrams, indented
+  // code, and table-like layouts render with their spacing intact instead
+  // of being shredded into one <p> per line.
+  const FENCE_RE = /^```(\S*)\s*$/;
+
   lines.forEach((line, i) => {
-    const trimmed = line.text.trim();
+    const raw = line.text;
+    const trimmed = raw.trim();
+    const fenceMatch = trimmed.match(FENCE_RE);
+
+    if (codeBuffer !== null) {
+      // Inside a fenced block.
+      if (fenceMatch) {
+        flushCode();
+      } else {
+        codeBuffer.push(raw);
+      }
+      return;
+    }
+
+    if (fenceMatch) {
+      // Opening a new fenced block.
+      flushList();
+      codeBuffer = [];
+      codeLanguage = fenceMatch[1] || '';
+      return;
+    }
+
     if (trimmed.startsWith('- ')) {
       listBuffer.push({
-        node: renderLine(line.text, i, searchTerm, activeMatchIndex),
+        node: renderLine(raw, i, searchTerm, activeMatchIndex),
         status: line.status,
       });
     } else {
       flushList();
-      const node = renderLine(line.text, i, searchTerm, activeMatchIndex);
+      const node = renderLine(raw, i, searchTerm, activeMatchIndex);
       if (node) {
         if (line.status === 'unchanged' || !trimmed) {
           blocks.push(node);
@@ -178,6 +219,9 @@ export function Markdown({ content, diffAgainst, searchTerm, activeMatchIndex, o
       }
     }
   });
+  // An unclosed code fence at EOF still flushes — better to render the
+  // collected lines as code than to silently drop them.
+  flushCode();
   flushList();
 
   return <div className="mx-md">{blocks}</div>;
