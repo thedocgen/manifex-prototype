@@ -521,6 +521,10 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     };
     setPendingFile(null);
     const updatedConvo = [...conversation, userMsg];
+    // /prompt will re-persist the full conversation (including this user
+    // message) atomically in its own write, so skip the client-side
+    // /conversation POST that would otherwise race with it.
+    convoSkipNextPersist.current = true;
     setConversation(updatedConvo);
 
     // Pass recent conversation context to API for multi-turn
@@ -585,15 +589,30 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         return;
       }
 
+      // The /prompt route now persists the conversation atomically in the
+      // same write that sets pending_attempt. Skip the next client-side
+      // /conversation POST so we don't race-overwrite the server's state.
+      // Trust the server for both branches by pulling conversation from
+      // the returned session's manifest_state.conversation when available.
+      const serverConversation: ConversationMessage[] | null = Array.isArray(data.session?.manifest_state?.conversation)
+        ? data.session.manifest_state.conversation
+        : null;
+
       if (data.response_type === 'question') {
-        // LLM asked a question — make conversation prominent
-        const assistantMsg: ConversationMessage = {
-          role: 'assistant',
-          content: data.message,
-          questions: data.questions,
-          timestamp: new Date().toISOString(),
-        };
-        setConversation(prev => [...prev, assistantMsg]);
+        if (serverConversation) {
+          convoSkipNextPersist.current = true;
+          setConversation(serverConversation);
+        } else {
+          // Legacy path: server didn't persist — fall back to client append.
+          const assistantMsg: ConversationMessage = {
+            role: 'assistant',
+            content: data.message,
+            questions: data.questions,
+            timestamp: new Date().toISOString(),
+          };
+          setConversation(prev => [...prev, assistantMsg]);
+        }
+        if (data.session) setSession(data.session);
         setConversationOpen(true);
         // Scroll conversation to bottom after render
         setTimeout(() => {
@@ -607,15 +626,20 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           const pa = data.session.pending_attempt;
           if (pa?.changed_pages?.length > 0) setActivePage(pa.changed_pages[0]);
         }
-        const pa = data.session?.pending_attempt;
-        const assistantMsg: ConversationMessage = {
-          role: 'assistant',
-          content: data.diff_summary || 'Changes applied.',
-          diff_summary: data.diff_summary,
-          changed_pages: pa?.changed_pages,
-          timestamp: new Date().toISOString(),
-        };
-        setConversation(prev => [...prev, assistantMsg]);
+        if (serverConversation) {
+          convoSkipNextPersist.current = true;
+          setConversation(serverConversation);
+        } else {
+          const pa = data.session?.pending_attempt;
+          const assistantMsg: ConversationMessage = {
+            role: 'assistant',
+            content: data.diff_summary || 'Changes applied.',
+            diff_summary: data.diff_summary,
+            changed_pages: pa?.changed_pages,
+            timestamp: new Date().toISOString(),
+          };
+          setConversation(prev => [...prev, assistantMsg]);
+        }
 
         // Safety net: re-fetch the session from the server. Concurrent writes
         // (presence, conversation persist) and React state batching have

@@ -60,20 +60,64 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     return NextResponse.json({ error: userMessage, kind, detail: msg }, { status });
   }
 
+  // Build the new conversation state on the server so this write is the
+  // single source of truth for "turn N completed". We append the user's
+  // message and the resulting assistant message to the existing
+  // manifest_state.conversation (the authoritative copy), then persist
+  // it atomically alongside pending_attempt. This eliminates the race
+  // between the client's /conversation persist POST and the /prompt
+  // updateSession — both used to touch overlapping parts of the row and
+  // occasionally left the local UI out of sync.
+  const nowIso = new Date().toISOString();
+  const existingConversation: ConversationMessage[] = Array.isArray(session.manifest_state?.conversation)
+    ? session.manifest_state.conversation
+    : [];
+  const userMessage: ConversationMessage = {
+    role: 'user',
+    content: prompt,
+    answers: body.answers,
+    timestamp: nowIso,
+  };
+
   if (response.type === 'question') {
-    // LLM asked a question — no doc changes, return question for the UI
+    // LLM asked a question — no doc changes, but we still persist both
+    // messages so the conversation survives a refresh.
+    const assistantMessage: ConversationMessage = {
+      role: 'assistant',
+      content: response.result.message,
+      questions: response.result.questions,
+      timestamp: nowIso,
+    };
+    const updatedManifest = {
+      ...session.manifest_state,
+      conversation: [...existingConversation, userMessage, assistantMessage],
+    };
+    const updated = await updateSession(id, { manifest_state: updatedManifest });
     return NextResponse.json({
-      session,
+      session: updated,
       response_type: 'question',
       message: response.result.message,
       questions: response.result.questions,
     });
   }
 
-  // LLM updated docs — create pending attempt
+  // LLM updated docs — create pending attempt AND append both messages
+  // to the conversation in one write.
   const proposed = makeManifestState(response.result.pages, response.result.tree);
+  const assistantMessage: ConversationMessage = {
+    role: 'assistant',
+    content: response.result.diff_summary || 'Changes applied.',
+    diff_summary: response.result.diff_summary,
+    changed_pages: response.result.changed_pages,
+    timestamp: nowIso,
+  };
+  const updatedManifest = {
+    ...session.manifest_state,
+    conversation: [...existingConversation, userMessage, assistantMessage],
+  };
 
   const updated = await updateSession(id, {
+    manifest_state: updatedManifest,
     pending_attempt: {
       prompt,
       proposed_manifest: proposed,
