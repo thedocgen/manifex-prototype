@@ -1,7 +1,7 @@
 // Supabase-backed store for Manifex.
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex, ManifexTeam, ManifexTeamMember, TeamRole, BuildHistoryEntry, BuildHistoryAction, PendingProposal, ProposalStatus, ProposalComment, TeamInvite } from './types';
+import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex, ManifexTeam, ManifexTeamMember, TeamRole, BuildHistoryEntry, BuildHistoryAction, PendingProposal, ProposalStatus, ProposalComment, TeamInvite, PresenceEntry } from './types';
 import { randomBytes } from 'crypto';
 import { LOCAL_DEV_TEAM, LOCAL_DEV_USER, migrateManifestState } from './types';
 import { sha256 } from './crypto';
@@ -772,6 +772,71 @@ export async function revokeTeamInvite(id: string): Promise<boolean> {
     throw new Error(`revokeTeamInvite: ${error.message}`);
   }
   return true;
+}
+
+// ────────────────────────────────────────────────────────────
+// Presence (Phase 2) — poll-based heartbeats
+// ────────────────────────────────────────────────────────────
+
+const PRESENCE_TTL_SECONDS = 30;
+
+function presenceTableMissing(err: { message?: string; code?: string } | null | undefined): boolean {
+  if (!err) return false;
+  if (err.code === '42P01' || err.code === 'PGRST205') return true;
+  const m = err.message || '';
+  return /manifex_presence/i.test(m) && /(does not exist|schema cache|Could not find)/i.test(m);
+}
+
+function rowToPresence(row: any): PresenceEntry {
+  return {
+    session_id: row.session_id,
+    user_id: row.user_id,
+    display_name: row.display_name ?? null,
+    page_path: row.page_path ?? null,
+    last_seen_at: row.last_seen_at,
+  };
+}
+
+export async function heartbeatPresence(input: {
+  session_id: string;
+  user_id: string;
+  display_name?: string | null;
+  page_path?: string | null;
+}): Promise<boolean> {
+  const { error } = await client()
+    .from('manifex_presence')
+    .upsert(
+      {
+        session_id: input.session_id,
+        user_id: input.user_id,
+        display_name: input.display_name ?? null,
+        page_path: input.page_path ?? null,
+        last_seen_at: new Date().toISOString(),
+      },
+      { onConflict: 'session_id,user_id' }
+    );
+  if (error) {
+    if (presenceTableMissing(error)) return false;
+    console.warn('heartbeatPresence failed:', error.message);
+    return false;
+  }
+  return true;
+}
+
+export async function listPresence(sessionId: string): Promise<PresenceEntry[]> {
+  const cutoff = new Date(Date.now() - PRESENCE_TTL_SECONDS * 1000).toISOString();
+  const { data, error } = await client()
+    .from('manifex_presence')
+    .select('*')
+    .eq('session_id', sessionId)
+    .gte('last_seen_at', cutoff)
+    .order('last_seen_at', { ascending: false });
+  if (error) {
+    if (presenceTableMissing(error)) return [];
+    console.warn('listPresence failed:', error.message);
+    return [];
+  }
+  return (data || []).map(rowToPresence);
 }
 
 export async function createProposalComment(input: {

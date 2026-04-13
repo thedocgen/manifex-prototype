@@ -179,6 +179,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [editMode, setEditMode] = useState(false);
   const [editCard, setEditCard] = useState<{ x: number; y: number; page: string; section: string; elementText: string; elementTag: string } | null>(null);
   const [editCardText, setEditCardText] = useState('');
+  const [presencePeers, setPresencePeers] = useState<{ user_id: string; display_name: string | null; page_path: string | null }[]>([]);
 
   // Track whether conversation was loaded from server (skip persisting on restore)
   const convoLoadedRef = useRef(false);
@@ -298,6 +299,35 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
   }, []);
+
+  // Presence heartbeat. Pings every 15s while the editor is mounted, sending
+  // the current page so other team members see what we're looking at. The
+  // server returns the peer list in the same response so we don't need a
+  // second round trip. Filters self out client-side.
+  useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+    const myUserId = session.user_id || 'local-dev-user';
+    const beat = async () => {
+      try {
+        const res = await fetch(`/api/manifex/sessions/${id}/presence`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: myUserId, page_path: activePage || null }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (cancelled || !data?.entries) return;
+        setPresencePeers(
+          data.entries
+            .filter((e: any) => e.user_id !== myUserId)
+            .map((e: any) => ({ user_id: e.user_id, display_name: e.display_name, page_path: e.page_path }))
+        );
+      } catch {}
+    };
+    beat();
+    const interval = setInterval(beat, 15000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [session?.id, activePage]);
 
   // When edit mode toggles, push state into the iframe.
   useEffect(() => {
@@ -878,6 +908,47 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                 </div>
               );
             })()}
+
+            {/* Presence badges — show team members currently viewing this session */}
+            {presencePeers.length > 0 && (
+              <div
+                data-testid="presence-bar"
+                style={{
+                  padding: '6px 16px',
+                  background: 'rgba(59, 130, 246, 0.06)',
+                  borderBottom: '1px solid var(--border)',
+                  fontSize: '11px',
+                  color: 'var(--text-muted)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  flexWrap: 'wrap',
+                }}
+              >
+                {presencePeers.map(peer => {
+                  const name = peer.display_name || peer.user_id;
+                  const where = peer.page_path ? ` viewing ${peer.page_path.replace(/-/g, ' ')}` : '';
+                  return (
+                    <span
+                      key={peer.user_id}
+                      title={`${name}${where}`}
+                      style={{
+                        display: 'inline-flex',
+                        alignItems: 'center',
+                        gap: '5px',
+                        padding: '2px 8px',
+                        borderRadius: '999px',
+                        background: 'rgba(59, 130, 246, 0.12)',
+                        color: '#1e40af',
+                      }}
+                    >
+                      <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#22c55e' }} />
+                      {name}{where && <span style={{ opacity: 0.75 }}>{where}</span>}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
 
             {/* Changes summary banner */}
             {pending && changedPaths.size > 0 && (

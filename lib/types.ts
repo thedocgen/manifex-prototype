@@ -142,6 +142,14 @@ export interface TeamInvite {
   revoked_at: string | null;
 }
 
+export interface PresenceEntry {
+  session_id: string;
+  user_id: string;
+  display_name: string | null;
+  page_path: string | null;
+  last_seen_at: string;
+}
+
 export interface BuildHistoryEntry {
   id: string;
   session_id: string;
