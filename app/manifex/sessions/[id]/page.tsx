@@ -407,6 +407,15 @@ export default function SessionPage({ params }: { params: Promise<{ id: string }
             >
               {status === 'committing' ? <><span className="mx-spinner" /> Pushing…</> : '↑ Commit'}
             </button>
+            <button
+              data-testid="export-pdf-btn"
+              onClick={() => window.open(`/api/manifex/sessions/${session.id}/export?auto=1`, '_blank', 'noopener')}
+              disabled={busy}
+              className="mx-btn mx-btn-ghost"
+              title="Open a print-ready view of the document in a new tab"
+            >
+              ⤓ Export PDF
+            </button>
           </div>
         </div>
       </footer>
