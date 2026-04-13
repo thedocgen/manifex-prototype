@@ -29,20 +29,51 @@ const TEST_RUNNER_SCRIPT = `
     el.dispatchEvent(new Event('change', { bubbles: true }));
   };
 
+  // Navigation guard installed for the duration of a test run. Without this,
+  // a test that clicks an <a href="/something"> tag (or the compiled app's
+  // own click handler does) navigates the iframe away from the test page —
+  // the runner script is gone, the parent's promise never resolves, and
+  // the Validate button hangs at 'Validating…' forever. The compiled app
+  // itself usually wants navigation to work, so we only block it while a
+  // test run is in progress.
+  function installNavGuard(){
+    var clickGuard = function(e){
+      var el = e.target && e.target.closest && e.target.closest('a[href]');
+      if (el) e.preventDefault();
+    };
+    var beforeUnload = function(e){ e.preventDefault(); e.returnValue = ''; return ''; };
+    document.addEventListener('click', clickGuard, true);
+    window.addEventListener('beforeunload', beforeUnload);
+    return function uninstall(){
+      document.removeEventListener('click', clickGuard, true);
+      window.removeEventListener('beforeunload', beforeUnload);
+    };
+  }
+
   window.__manifexRunTests = async function(){
     var tests = window.__manifexTests || [];
     var results = [];
-    for (var i = 0; i < tests.length; i++) {
-      var t = tests[i];
-      var category = t.category || 'structural';
-      var startedAt = Date.now();
-      try {
-        // fn may return a Promise — await it. Handles both sync and async tests.
-        await Promise.resolve(t.fn());
-        results.push({ name: t.name, category: category, passed: true, durationMs: Date.now() - startedAt });
-      } catch (e) {
-        results.push({ name: t.name, category: category, passed: false, error: (e && e.message) || String(e), durationMs: Date.now() - startedAt });
+    var uninstall = installNavGuard();
+    try {
+      for (var i = 0; i < tests.length; i++) {
+        var t = tests[i];
+        var category = t.category || 'structural';
+        var startedAt = Date.now();
+        try {
+          // fn may return a Promise — await it. Handles both sync and async tests.
+          // Race against a per-test timeout so a hung await can't lock the whole run.
+          var TEST_TIMEOUT_MS = 8000;
+          await Promise.race([
+            Promise.resolve(t.fn()),
+            new Promise(function(_, reject){ setTimeout(function(){ reject(new Error('test timed out after ' + TEST_TIMEOUT_MS + 'ms')); }, TEST_TIMEOUT_MS); }),
+          ]);
+          results.push({ name: t.name, category: category, passed: true, durationMs: Date.now() - startedAt });
+        } catch (e) {
+          results.push({ name: t.name, category: category, passed: false, error: (e && e.message) || String(e), durationMs: Date.now() - startedAt });
+        }
       }
+    } finally {
+      uninstall();
     }
     return {
       total: results.length,

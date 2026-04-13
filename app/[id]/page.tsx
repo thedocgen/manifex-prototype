@@ -340,7 +340,18 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     setValidating(true);
     try {
       // Runner is async — behavior tests await sleeps, DOM updates, etc.
-      const r = await Promise.resolve(win.__manifexRunTests());
+      // Cap the whole run at 90s as a safety net. The iframe-side runner
+      // installs a navigation guard while tests are running so a stray
+      // anchor click can't break the runner mid-flight, but if the iframe
+      // is somehow gone (navigated, refreshed, unloaded) the parent's
+      // promise would never resolve. The race surfaces a clear error
+      // instead of a stuck button.
+      const RUNNER_TIMEOUT_MS = 90_000;
+      const runner = Promise.resolve(win.__manifexRunTests());
+      const timeout = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`test runner timed out after ${RUNNER_TIMEOUT_MS}ms`)), RUNNER_TIMEOUT_MS),
+      );
+      const r = await Promise.race([runner, timeout]);
       setValidateResult(r);
     } catch (e: any) {
       setValidateResult({ total: 0, passed: 0, results: [{ name: 'Test runner crashed', passed: false, error: e?.message || String(e) }] });
