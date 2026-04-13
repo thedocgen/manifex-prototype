@@ -503,7 +503,7 @@ CONTENT QUALITY:
 - Generate real, contextual placeholder content appropriate for the app type
 - Never use "Lorem ipsum" or generic placeholders
 - Use realistic sample data (names, dates, descriptions that fit the domain)
-- NEVER use emojis in generated output. Use SVG icons, simple Unicode symbols (arrows, bullets, dashes), or text labels instead. The output must be professional.
+- NEVER use emojis in generated output. This is absolute and applies to EVERY symbol slot, including ones where an emoji feels like the obvious shorthand: bell/notification (🔔), sound on/off (🔊 🔇), play/pause/stop (▶ ⏸ ⏹), checkmark/cross (✅ ❌), star ratings (⭐), arrows (➡), warning (⚠️). Replace with inline <svg> icons, geometric Unicode symbols (● ■ ▲ ◆ ✓ ✗ → ⏵ ⏸ ⏹), or short text labels ("On"/"Off", "Mute"/"Unmute"). The output must look like Stripe or Linear, not a chat app.
 
 TIME-BASED FEATURES (timers, countdowns, stopwatches, polling, animations):
 - Per-second ticks MUST use setInterval(fn, 1000). Do NOT use sub-second intervals (100ms, 250ms, etc.) and decrement by 1 second per tick — that produces a timer that runs many times faster than real time. This is a recurring failure mode; do not repeat it.
