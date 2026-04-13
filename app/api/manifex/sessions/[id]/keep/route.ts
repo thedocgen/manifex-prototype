@@ -28,9 +28,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const shaBefore = session.manifest_state.sha;
   const proposal = session.pending_attempt;
   const newHistory = [...session.history, session.manifest_state];
+  // Carry the current conversation forward into the new manifest_state.
+  // proposal.proposed_manifest is built via makeManifestState(pages, tree)
+  // which doesn't include a conversation field, so without this merge the
+  // turn history would be wiped on every keep — Build History sidebar
+  // entry would vanish, the conversation thread would empty on nav-back,
+  // etc.
+  const carriedConversation = (session.manifest_state as any)?.conversation || [];
+  const newManifestState = {
+    ...proposal.proposed_manifest,
+    ...(carriedConversation.length > 0 ? { conversation: carriedConversation } : {}),
+  };
   const updated = await updateSession(id, {
     history: newHistory,
-    manifest_state: proposal.proposed_manifest,
+    manifest_state: newManifestState,
     pending_attempt: null,
     redo_stack: [],
   });
