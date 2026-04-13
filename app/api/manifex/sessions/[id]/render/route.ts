@@ -16,14 +16,20 @@ function extractCssVariables(stylesContent: string): string {
   const lines = stylesContent.split('\n');
   const vars: string[] = [];
   for (const line of lines) {
-    // Match "- SomeName: #hex" (possibly with a second " / #hex" alternate)
-    const m = line.match(/^-\s+(.+?):\s*(#[0-9a-fA-F]{3,8})/);
+    // Match a name followed by ": #hex". Tolerates leading "- ", "* ", numbered
+    // bullets, bold/italic markers, inline code ticks. Examples that match:
+    //   - Primary: #1e293b
+    //   * **Background:** #ffffff
+    //   1. `accent`: #f97316
+    //   Primary color: #1e293b / #0f172a
+    const m = line.match(/^[\s\-*+\d.)\]]*[`*_]*([A-Za-z][A-Za-z0-9 \-_]*?)[`*_]*\s*:\s*(#[0-9a-fA-F]{3,8})/);
     if (m) {
       const name = m[1]
         .trim()
         .toLowerCase()
         .replace(/\s+/g, '-')
         .replace(/[^a-z0-9-]/g, '');
+      if (!name) continue;
       vars.push(`  --manifex-${name}: ${m[2]};`);
 
       // Check for a secondary value after " / "
@@ -127,8 +133,12 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
 
       const stylesContent = detectStyleOnlyChange(session.manifest_state, prevState);
       if (stylesContent !== null) {
-        console.log(`[render] style-only change detected, skipping LLM recompile`);
         const cssBlock = extractCssVariables(stylesContent);
+        if (!cssBlock) {
+          console.log(`[render] style-only change but no extractable color vars — full recompile`);
+          break;
+        }
+        console.log(`[render] style-only change detected, skipping LLM recompile`);
         const baseInlined = inlineCodex(prevCompiled.files);
         const patchedHtml = injectCssVariables(baseInlined, cssBlock);
 
