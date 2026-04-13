@@ -176,7 +176,20 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   console.log(`[render] cache MISS for sha ${manifestSha.slice(0, 12)}, compiling…`);
   // Fetch project secrets for injection
   const secrets = await getSecrets(session.project_id);
-  compiled = await compileManifestToCodex(session.manifest_state, Object.keys(secrets).length > 0 ? secrets : undefined);
+  try {
+    compiled = await compileManifestToCodex(session.manifest_state, Object.keys(secrets).length > 0 ? secrets : undefined);
+  } catch (e: any) {
+    const msg: string = e?.message || 'unknown';
+    const status: number = e?.status || 500;
+    let userMessage = 'Could not build your app right now.';
+    let kind = 'unknown';
+    if (status === 429 || /rate.?limit/i.test(msg)) { kind = 'rate_limit'; userMessage = 'The compiler is rate-limited. Try building again in a moment.'; }
+    else if (status === 401 || /api.?key/i.test(msg)) { kind = 'auth'; userMessage = 'The Anthropic API key is missing or invalid.'; }
+    else if (/overload|529/i.test(msg)) { kind = 'overload'; userMessage = 'The compiler is overloaded. Try again in a few seconds.'; }
+    else if (/timeout|ECONNRESET|fetch/i.test(msg)) { kind = 'network'; userMessage = 'Lost connection to the compiler. Check your internet and try again.'; }
+    console.error('[render] compile failed:', kind, msg);
+    return NextResponse.json({ error: userMessage, kind, detail: msg }, { status });
+  }
   await putCachedCompilation(manifestSha, COMPILER_VERSION, compiled);
 
   const inlined = inlineCodex(compiled.files);

@@ -265,11 +265,11 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     try {
       try { new BroadcastChannel('manifex-preview').postMessage({ type: 'compiling' }); } catch {}
       const res = await fetch(`/api/manifex/sessions/${id}/render`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setPreviewError('Something went wrong building your app. Try making another change.');
+        setPreviewError(data?.error || 'Something went wrong building your app. Try making another change.');
         return;
       }
-      const data = await res.json();
       if (data.inlined_html) {
         setPreviewHtml(data.inlined_html);
         try { new BroadcastChannel('manifex-preview').postMessage({ type: 'update', html: data.inlined_html }); } catch {}
