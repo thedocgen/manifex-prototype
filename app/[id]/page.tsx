@@ -8,16 +8,45 @@ type StatusKind = 'idle' | 'thinking' | 'compiling' | 'saving' | 'success' | 'er
 
 // ── Preview Bridge Script (injected into compiled HTML) ──
 const PREVIEW_BRIDGE_SCRIPT = `<script>
-// Click-to-identify: walk up DOM to find data-doc-page, notify parent
+// Visual edit mode toggle, set by parent via postMessage.
+var __visualEditMode = false;
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'set-edit-mode') {
+    __visualEditMode = !!e.data.enabled;
+    document.body.style.cursor = __visualEditMode ? 'crosshair' : '';
+  }
+});
+// Click handler: walk up DOM to find data-doc-page.
+// In normal mode → emit doc-navigate (sidebar follows).
+// In visual edit mode → emit visual-edit with click coords + section info,
+//   parent overlays a floating card near the click.
 document.addEventListener('click', function(e) {
   var el = e.target;
   while (el && el !== document.body) {
     if (el.dataset && el.dataset.docPage) {
-      window.parent.postMessage({ type: 'doc-navigate', page: el.dataset.docPage, section: el.dataset.docSection || '' }, '*');
-      el.style.outline = '2px solid rgba(59, 130, 246, 0.6)';
-      el.style.outlineOffset = '2px';
-      setTimeout(function() { el.style.outline = ''; el.style.outlineOffset = ''; }, 800);
+      var rect = el.getBoundingClientRect();
+      var iframeRect = { x: 0, y: 0 }; // placeholder, parent re-projects against its own frame
+      var payload = {
+        page: el.dataset.docPage,
+        section: el.dataset.docSection || '',
+        clickX: e.clientX,
+        clickY: e.clientY,
+        elementText: (el.textContent || '').slice(0, 80).trim(),
+        elementTag: el.tagName.toLowerCase(),
+      };
+      if (__visualEditMode) {
+        window.parent.postMessage(Object.assign({ type: 'visual-edit' }, payload), '*');
+        el.style.outline = '2px dashed rgba(217, 119, 6, 0.85)';
+        el.style.outlineOffset = '2px';
+        setTimeout(function() { el.style.outline = ''; el.style.outlineOffset = ''; }, 1500);
+      } else {
+        window.parent.postMessage({ type: 'doc-navigate', page: payload.page, section: payload.section }, '*');
+        el.style.outline = '2px solid rgba(59, 130, 246, 0.6)';
+        el.style.outlineOffset = '2px';
+        setTimeout(function() { el.style.outline = ''; el.style.outlineOffset = ''; }, 800);
+      }
       e.preventDefault();
+      e.stopPropagation();
       return;
     }
     el = el.parentElement;
@@ -141,6 +170,9 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [pendingFile, setPendingFile] = useState<{ type: 'image' | 'text' | 'pdf'; base64?: string; mediaType?: string; textContent?: string; fileName: string; previewUrl?: string } | null>(null);
   const [validateResult, setValidateResult] = useState<{ total: number; passed: number; results: { name: string; passed: boolean; error?: string }[] } | null>(null);
   const [validating, setValidating] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [editCard, setEditCard] = useState<{ x: number; y: number; page: string; section: string; elementText: string; elementTag: string } | null>(null);
+  const [editCardText, setEditCardText] = useState('');
 
   // Track whether conversation was loaded from server (skip persisting on restore)
   const convoLoadedRef = useRef(false);
@@ -241,10 +273,47 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
           if (textarea) { textarea.focus(); textarea.setSelectionRange(textarea.value.length, textarea.value.length); }
         }, 100);
       }
+      if (e.data?.type === 'visual-edit' && e.data.page) {
+        // Project the iframe-local click coordinates into parent space.
+        const iframe = iframeRef.current;
+        const rect = iframe?.getBoundingClientRect();
+        const x = (rect?.left ?? 0) + (e.data.clickX ?? 0);
+        const y = (rect?.top ?? 0) + (e.data.clickY ?? 0);
+        setEditCard({
+          x, y,
+          page: e.data.page,
+          section: e.data.section || '',
+          elementText: e.data.elementText || '',
+          elementTag: e.data.elementTag || '',
+        });
+        setEditCardText('');
+      }
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
   }, []);
+
+  // When edit mode toggles, push state into the iframe.
+  useEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe?.contentWindow) return;
+    iframe.contentWindow.postMessage({ type: 'set-edit-mode', enabled: editMode }, '*');
+    // Closing edit mode also dismisses any open card.
+    if (!editMode) setEditCard(null);
+  }, [editMode, previewHtml]);
+
+  const submitVisualEdit = () => {
+    if (!editCard || !editCardText.trim()) return;
+    const sectionLabel = editCard.section ? editCard.section.replace(/-/g, ' ') : '';
+    const pageLabel = editCard.page.replace(/-/g, ' ');
+    const scopedPrompt = sectionLabel
+      ? `Edit only the "${sectionLabel}" section of the "${pageLabel}" page (the ${editCard.elementTag} containing "${editCard.elementText}"): ${editCardText.trim()}`
+      : `Edit only the "${pageLabel}" page (the ${editCard.elementTag} containing "${editCard.elementText}"): ${editCardText.trim()}`;
+    setEditCard(null);
+    setEditCardText('');
+    setEditMode(false);
+    submitPrompt(scopedPrompt);
+  };
 
   // Send highlight message to iframe
   const highlightInPreview = useCallback((section: string | null) => {
@@ -944,6 +1013,21 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
               <div style={{ position: 'relative', width: '100%', height: '100%' }}>
                 <iframe ref={iframeRef} data-testid="preview-iframe" srcDoc={previewHtml + PREVIEW_BRIDGE_SCRIPT} style={{ width: '100%', height: '100%', border: 'none' }} />
                 <button
+                  onClick={() => setEditMode(m => !m)}
+                  className="mx-btn mx-btn-secondary"
+                  data-testid="visual-edit-btn"
+                  style={{
+                    position: 'absolute', top: '8px', right: '108px', fontSize: '12px', padding: '6px 12px',
+                    opacity: 0.92,
+                    background: editMode ? 'var(--accent)' : undefined,
+                    color: editMode ? '#fff' : undefined,
+                    borderColor: editMode ? 'var(--accent)' : undefined,
+                  }}
+                  title={editMode ? 'Click an element in the preview to edit it' : 'Edit a specific element by clicking it'}
+                >
+                  {editMode ? 'Click an element…' : 'Visual edit'}
+                </button>
+                <button
                   onClick={runValidate}
                   disabled={validating}
                   className="mx-btn mx-btn-secondary"
@@ -1365,6 +1449,80 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         <div className={`mx-toast ${toast.kind}`}>
           {toast.kind === 'success' ? '✓' : '⚠'} {toast.msg}
         </div>
+      )}
+      {/* Visual edit floating card — fixed-position so it can extend beyond the iframe */}
+      {editCard && (
+        <>
+          <div
+            onClick={() => { setEditCard(null); setEditCardText(''); }}
+            style={{ position: 'fixed', inset: 0, zIndex: 9998, background: 'transparent' }}
+          />
+          <div
+            data-testid="visual-edit-card"
+            style={{
+              position: 'fixed',
+              left: Math.min(editCard.x + 12, (typeof window !== 'undefined' ? window.innerWidth : 1024) - 340),
+              top: Math.min(editCard.y + 12, (typeof window !== 'undefined' ? window.innerHeight : 768) - 200),
+              width: '320px',
+              background: 'var(--bg-card, #fff)',
+              border: '1px solid var(--border, #e5e7eb)',
+              borderRadius: '10px',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.18)',
+              padding: '12px',
+              zIndex: 9999,
+              fontSize: '12px',
+              color: 'var(--text, #111)',
+            }}
+          >
+            <div style={{ fontSize: '11px', color: 'var(--text-dim, #666)', marginBottom: '6px' }}>
+              Editing <strong>{editCard.section ? editCard.section.replace(/-/g, ' ') : editCard.page.replace(/-/g, ' ')}</strong>
+              {editCard.elementText && (
+                <span style={{ display: 'block', marginTop: '2px', fontStyle: 'italic', opacity: 0.85 }}>
+                  &ldquo;{editCard.elementText}&rdquo;
+                </span>
+              )}
+            </div>
+            <textarea
+              autoFocus
+              value={editCardText}
+              onChange={e => setEditCardText(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitVisualEdit(); }
+                if (e.key === 'Escape') { setEditCard(null); setEditCardText(''); }
+              }}
+              placeholder="What should change here? (⌘+Enter to submit)"
+              rows={3}
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                borderRadius: '6px',
+                border: '1px solid var(--border, #e5e7eb)',
+                fontSize: '12px',
+                fontFamily: 'inherit',
+                resize: 'vertical',
+                boxSizing: 'border-box',
+              }}
+            />
+            <div style={{ display: 'flex', gap: '6px', marginTop: '8px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => { setEditCard(null); setEditCardText(''); }}
+                className="mx-btn mx-btn-ghost"
+                style={{ fontSize: '11px', padding: '5px 10px' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitVisualEdit}
+                disabled={!editCardText.trim()}
+                className="mx-btn mx-btn-primary"
+                data-testid="visual-edit-submit"
+                style={{ fontSize: '11px', padding: '5px 10px' }}
+              >
+                Apply
+              </button>
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
