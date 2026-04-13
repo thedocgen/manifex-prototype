@@ -117,6 +117,19 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'not found' }, { status: 404 });
 
+  // Defensive guard: refuse to compile while a non-draft pending proposal
+  // is open. Otherwise the compile runs against the OLD manifest_state and
+  // the user's just-generated content gets bypassed silently — they see
+  // the starter "New Project" placeholder in the iframe instead of their
+  // app. The UI also gates the Build button, but this catches every
+  // direct-API path (curl, retry hooks, future automation, etc.) too.
+  if (session.pending_attempt && !session.pending_attempt.draft) {
+    return NextResponse.json({
+      error: 'You have proposed changes waiting. Click "Looks good" to accept them before building.',
+      reason: 'pending_not_accepted',
+    }, { status: 409 });
+  }
+
   const manifestSha = session.manifest_state.sha;
 
   // Check exact cache first

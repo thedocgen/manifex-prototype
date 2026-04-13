@@ -923,6 +923,11 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const baseState = pending ? session.manifest_state : null;
   const changedPaths = new Set<string>(pending?.changed_pages || []);
   const busy = status !== 'idle';
+  // True when the user has a finalized proposal sitting in pending_attempt
+  // that they haven't accepted yet. While this is true, /render would
+  // compile the OLD manifest_state and silently bypass the proposal —
+  // every UI path that triggers a render needs to gate on this.
+  const pendingNotAccepted = !!(pending && !pending.draft);
 
   // The starter manifest is the empty new-project state: a single 'overview'
   // page with the boilerplate "Describe your app idea below…" content. We
@@ -1459,52 +1464,52 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
               </button>
               </>
             )}
-            {previewHtml && (
-              <button
-                data-testid="breakout-btn"
-                onClick={() => {
-                  const w = window.open('', '_blank');
-                  if (w) {
-                    // Write initial HTML + BroadcastChannel listener for live updates.
-                    // Channel name is scoped per-session so each breakout tab only receives
-                    // updates for its own session — stops cross-session contamination.
-                    const listenerScript = `<script>
-                      const ch = new BroadcastChannel("manifex-preview-${id}");
-                      ch.onmessage = e => {
-                        if (e.data.type === 'update' && e.data.html) {
-                          document.open();
-                          document.write(e.data.html);
-                          document.close();
-                        }
-                        if (e.data.type === 'compiling') {
-                          if (!document.getElementById('mx-compile-overlay')) {
-                            const d = document.createElement('div');
-                            d.id = 'mx-compile-overlay';
-                            d.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,0.9);display:flex;align-items:center;justify-content:center;z-index:9999;font-family:system-ui;color:#374151;font-size:14px';
-                            d.textContent = 'Building your app…';
-                            document.body.appendChild(d);
-                          }
-                        }
-                      };
-                    </script>`;
-                    w.document.open();
-                    w.document.write(previewHtml + listenerScript);
-                    w.document.close();
-                  }
-                }}
-                style={{
-                  background: 'transparent',
-                  border: '1px solid var(--border-strong)',
-                  color: 'var(--text-muted)',
-                  padding: '3px 8px',
-                  borderRadius: '4px',
-                  fontSize: '11px',
-                  cursor: 'pointer',
-                }}
-              >
-                Open in new tab
-              </button>
-            )}
+            {previewHtml && (() => {
+              // With per-session devboxes (Phase 2A), the iframe is
+              // already pointing at a real public URL. "Open in new tab"
+              // is now just window.open(devboxUrl) — the BroadcastChannel
+              // breakout dance was the right answer for srcdoc-only
+              // previews but does the wrong thing now (writes a stale
+              // copy of previewHtml into about:blank instead of opening
+              // the live devbox).
+              //
+              // Falls back to a srcdoc-blob window for sessions that
+              // don't have a devbox yet (rare — usually only during the
+              // very-first build before the provision call returns).
+              const devboxUrl: string | undefined = (session?.manifest_state as any)?.devbox?.url;
+              return (
+                <a
+                  data-testid="breakout-btn"
+                  href={devboxUrl || '#'}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={(e) => {
+                    if (devboxUrl) return; // let the anchor do its thing
+                    e.preventDefault();
+                    // Legacy srcdoc fallback: open a blank tab and write previewHtml into it.
+                    const w = window.open('', '_blank');
+                    if (w) {
+                      w.document.open();
+                      w.document.write(previewHtml);
+                      w.document.close();
+                    }
+                  }}
+                  style={{
+                    background: 'transparent',
+                    border: '1px solid var(--border-strong)',
+                    color: 'var(--text-muted)',
+                    padding: '3px 8px',
+                    borderRadius: '4px',
+                    fontSize: '11px',
+                    cursor: 'pointer',
+                    textDecoration: 'none',
+                    display: 'inline-block',
+                  }}
+                >
+                  Open in new tab
+                </a>
+              );
+            })()}
             </div>
           </div>
           <div style={{ flex: 1, background: '#fff', position: 'relative' }}>
@@ -1514,7 +1519,13 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             {previewError ? (
               <div style={{ padding: '40px 24px', textAlign: 'center', color: '#6b7280' }}>
                 <p style={{ fontSize: '15px', margin: '0 0 16px' }}>{previewError}</p>
-                <button onClick={renderInBackground} className="mx-btn mx-btn-secondary" style={{ fontSize: '13px' }}>
+                <button
+                  onClick={renderInBackground}
+                  disabled={pendingNotAccepted}
+                  title={pendingNotAccepted ? 'Accept the proposed changes first (click "Looks good")' : undefined}
+                  className="mx-btn mx-btn-secondary"
+                  style={{ fontSize: '13px', opacity: pendingNotAccepted ? 0.5 : 1 }}
+                >
                   Try rebuilding
                 </button>
               </div>
@@ -1658,14 +1669,18 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         }}>
           <button
             onClick={renderInBackground}
-            disabled={busy}
+            disabled={busy || pendingNotAccepted}
+            data-testid="build-btn"
+            title={pendingNotAccepted ? 'Accept the proposed changes first (click "Looks good")' : undefined}
             className="mx-btn mx-btn-primary"
-            style={{ padding: '12px 32px', fontSize: '15px' }}
+            style={{ padding: '12px 32px', fontSize: '15px', opacity: pendingNotAccepted ? 0.5 : 1, cursor: pendingNotAccepted ? 'not-allowed' : 'pointer' }}
           >
             Build your app
           </button>
           <p style={{ fontSize: '12px', color: 'var(--text-dim)', margin: '8px 0 0' }}>
-            Review the documentation above, then build when ready.
+            {pendingNotAccepted
+              ? 'You have proposed changes waiting — click "Looks good" first.'
+              : 'Review the documentation above, then build when ready.'}
           </p>
         </div>
       )}

@@ -76,20 +76,50 @@ function renderLine(line: string, key: number, searchTerm?: string, activeMatchI
   if (!trimmed) return <br key={key} />;
 
   const renderInline = (text: string): React.ReactNode[] => {
+    // Single-pass tokenizer for the inline markdown the LLM actually emits:
+    // **bold**, *italic*, `code`, and [label](url) links. We pick the
+    // earliest match across all four patterns at each step so they nest
+    // correctly without per-pattern passes that would re-process inner text.
+    // Plain runs go through highlightSearch for the search-mark feature.
     const parts: React.ReactNode[] = [];
-    let lastIdx = 0;
-    const re = /`([^`]+)`/g;
-    let m: RegExpExecArray | null;
-    let idx = 0;
-    while ((m = re.exec(text))) {
-      if (m.index > lastIdx) {
-        parts.push(...highlightSearch(text.slice(lastIdx, m.index), searchTerm || '', activeMatchIdx ?? -1));
+    const term = searchTerm || '';
+    const active = activeMatchIdx ?? -1;
+    let cursor = 0;
+    let key = 0;
+    // Order matters for the regex flags: ** before * (so bold isn't read as
+    // two italics), and we use non-greedy bodies. Matched as a single union
+    // so we get the earliest hit on each iteration.
+    const PATTERN = /\*\*([^*\n]+?)\*\*|\*([^*\n]+?)\*|`([^`\n]+?)`|\[([^\]\n]+?)\]\(([^)\n]+?)\)/g;
+    while (cursor < text.length) {
+      PATTERN.lastIndex = cursor;
+      const m = PATTERN.exec(text);
+      if (!m) {
+        parts.push(...highlightSearch(text.slice(cursor), term, active));
+        break;
       }
-      parts.push(<code key={`c${idx++}`}>{...highlightSearch(m[1], searchTerm || '', activeMatchIdx ?? -1)}</code>);
-      lastIdx = m.index + m[0].length;
-    }
-    if (lastIdx < text.length) {
-      parts.push(...highlightSearch(text.slice(lastIdx), searchTerm || '', activeMatchIdx ?? -1));
+      if (m.index > cursor) {
+        parts.push(...highlightSearch(text.slice(cursor, m.index), term, active));
+      }
+      if (m[1] !== undefined) {
+        parts.push(<strong key={`b${key++}`}>{highlightSearch(m[1], term, active)}</strong>);
+      } else if (m[2] !== undefined) {
+        parts.push(<em key={`i${key++}`}>{highlightSearch(m[2], term, active)}</em>);
+      } else if (m[3] !== undefined) {
+        parts.push(<code key={`c${key++}`}>{highlightSearch(m[3], term, active)}</code>);
+      } else if (m[4] !== undefined && m[5] !== undefined) {
+        parts.push(
+          <a
+            key={`a${key++}`}
+            href={m[5]}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{ color: 'var(--accent)', textDecoration: 'underline' }}
+          >
+            {highlightSearch(m[4], term, active)}
+          </a>,
+        );
+      }
+      cursor = m.index + m[0].length;
     }
     return parts;
   };
