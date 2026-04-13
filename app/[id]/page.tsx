@@ -1122,6 +1122,45 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
               </span>
               {compiling && <span style={{ color: 'var(--accent)' }}>Updating…</span>}
             </span>
+            <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+            {previewHtml && (
+              <>
+              <button
+                onClick={() => setEditMode(m => !m)}
+                data-testid="visual-edit-btn"
+                style={{
+                  background: editMode ? 'var(--accent)' : 'transparent',
+                  border: '1px solid ' + (editMode ? 'var(--accent)' : 'var(--border-strong)'),
+                  color: editMode ? '#fff' : 'var(--text-muted)',
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  cursor: 'pointer',
+                }}
+                title={editMode ? 'Click an element in the preview to edit it' : 'Edit a specific element by clicking it'}
+              >
+                {editMode ? 'Click an element…' : 'Visual edit'}
+              </button>
+              <button
+                onClick={runValidate}
+                disabled={validating}
+                data-testid="validate-btn"
+                style={{
+                  background: 'transparent',
+                  border: '1px solid var(--border-strong)',
+                  color: 'var(--text-muted)',
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  fontSize: '11px',
+                  cursor: validating ? 'default' : 'pointer',
+                  opacity: validating ? 0.6 : 1,
+                }}
+                title="Run the test suite for this app"
+              >
+                {validating ? 'Validating…' : 'Validate'}
+              </button>
+              </>
+            )}
             {previewHtml && (
               <button
                 data-testid="breakout-btn"
@@ -1166,6 +1205,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
                 Open in new tab
               </button>
             )}
+            </div>
           </div>
           <div style={{ flex: 1, background: '#fff', position: 'relative' }}>
             {compiling && (
@@ -1181,31 +1221,6 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
             ) : previewHtml ? (
               <div style={{ position: 'relative', width: '100%', height: '100%' }}>
                 <iframe ref={iframeRef} data-testid="preview-iframe" srcDoc={previewHtml + PREVIEW_BRIDGE_SCRIPT} style={{ width: '100%', height: '100%', border: 'none' }} />
-                <button
-                  onClick={() => setEditMode(m => !m)}
-                  className="mx-btn mx-btn-secondary"
-                  data-testid="visual-edit-btn"
-                  style={{
-                    position: 'absolute', top: '8px', right: '108px', fontSize: '12px', padding: '6px 12px',
-                    opacity: 0.92,
-                    background: editMode ? 'var(--accent)' : undefined,
-                    color: editMode ? '#fff' : undefined,
-                    borderColor: editMode ? 'var(--accent)' : undefined,
-                  }}
-                  title={editMode ? 'Click an element in the preview to edit it' : 'Edit a specific element by clicking it'}
-                >
-                  {editMode ? 'Click an element…' : 'Visual edit'}
-                </button>
-                <button
-                  onClick={runValidate}
-                  disabled={validating}
-                  className="mx-btn mx-btn-secondary"
-                  data-testid="validate-btn"
-                  style={{ position: 'absolute', top: '8px', right: '8px', fontSize: '12px', padding: '6px 12px', opacity: 0.92 }}
-                  title="Run the test suite for this app"
-                >
-                  {validating ? 'Validating…' : 'Validate'}
-                </button>
                 {validateResult && (
                   <div
                     data-testid="validate-results"
