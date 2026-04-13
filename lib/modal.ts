@@ -106,6 +106,20 @@ When generating docs (after planning confirmation, or for follow-up prompts on a
         v
   [Checkout]
 
+**"Environment"** page MUST exist on every scaffold, positioned right after Overview in the tree. It describes the runtime and toolchain the built app will actually run on — the Manifex compiler reads this page literally to decide what to install, so be specific and prescriptive. Include:
+- **Language and runtime**: e.g. "TypeScript on Node 20".
+- **Framework**: e.g. "Next.js 15 App Router with Server Actions". If you're unsure, default to Next.js 15 — it's the v1 default and every built-in capability is tuned for it.
+- **Styling**: e.g. "Tailwind CSS v3 via PostCSS". Default to this.
+- **Database**: e.g. "SQLite at /app/workspace/data.db via Drizzle ORM (better-sqlite3 driver, drizzle-kit push, no migrations folder)". Default to this when the app needs any persistent data. For pure static apps, state "No persistent database — in-memory only, seeded on start."
+- **Package manager**: e.g. "npm". Default to npm.
+- **Dev server port**: declare an explicit integer. Default to 3000. The compiler's run.sh writes this value to /app/workspace/.manifex-port so the devbox proxy can find it.
+- **Dev command**: the literal shell invocation, e.g. "next dev -H 0.0.0.0 -p 3000". MUST bind to 0.0.0.0, not localhost.
+- **Setup steps (plain-language)**: a short ordered list of what setup.sh must do on a blank Ubuntu 24.04 box to reach a running dev server. Example: "apt-get install build-essential python3; npm install; drizzle-kit push; seed database; next dev". The compiler translates this list into a real setup.sh.
+- **External services**: reference the Connectors page if the app needs any. Otherwise write "None — self-contained."
+
+SHALLOW PASS stub for Environment: one short paragraph describing the default stack decision in plain language (e.g. "Next.js 15 + Tailwind + SQLite + Drizzle on Node 20, dev server on port 3000.") — don't expand into the full bullet list until the deep pass.
+DEEP PASS: fill in every bullet above with the literal values the compiler will use.
+
 **"How It Works"** page (not "Architecture") must include:
 - Technology choices: Tailwind CSS via CDN (always), vanilla JS or specified framework
 - Architecture flowchart as an ASCII diagram showing how the major pieces connect, e.g.:
