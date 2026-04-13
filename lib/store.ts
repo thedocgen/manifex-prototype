@@ -1,7 +1,7 @@
 // Supabase-backed store for Manifex.
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex, ManifexTeam, ManifexTeamMember, TeamRole, BuildHistoryEntry, BuildHistoryAction } from './types';
+import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex, ManifexTeam, ManifexTeamMember, TeamRole, BuildHistoryEntry, BuildHistoryAction, PendingProposal, ProposalStatus, ProposalComment } from './types';
 import { LOCAL_DEV_TEAM, LOCAL_DEV_USER, migrateManifestState } from './types';
 import { sha256 } from './crypto';
 
@@ -501,4 +501,162 @@ export async function listBuildHistory(sessionId: string, limit = 50): Promise<B
     return [];
   }
   return (data || []).map(rowToHistoryEntry);
+}
+
+// ────────────────────────────────────────────────────────────
+// Pending proposals (Phase 2 — docs-as-PRs)
+// ────────────────────────────────────────────────────────────
+
+function proposalsTableMissing(err: { message?: string; code?: string } | null | undefined): boolean {
+  if (!err) return false;
+  if (err.code === '42P01' || err.code === 'PGRST205') return true;
+  const m = err.message || '';
+  return /manifex_pending_attempts/i.test(m) && /(does not exist|schema cache|Could not find)/i.test(m);
+}
+
+function rowToProposal(row: any): PendingProposal {
+  const proposed = migrateManifestState(row.proposed_manifest);
+  return {
+    id: row.id,
+    session_id: row.session_id,
+    author_id: row.author_id,
+    base_sha: row.base_sha,
+    prompt: row.prompt,
+    proposed_manifest: proposed,
+    diff_summary: row.diff_summary ?? null,
+    changed_pages: row.changed_pages ?? null,
+    status: (row.status as ProposalStatus) || 'open',
+    created_at: row.created_at,
+    resolved_by: row.resolved_by ?? null,
+    resolved_at: row.resolved_at ?? null,
+  };
+}
+
+export async function createProposal(input: {
+  session_id: string;
+  author_id: string;
+  base_sha: string;
+  prompt: string;
+  proposed_manifest: ManifestState;
+  diff_summary?: string | null;
+  changed_pages?: string[] | null;
+}): Promise<PendingProposal | null> {
+  const row = {
+    session_id: input.session_id,
+    author_id: input.author_id,
+    base_sha: input.base_sha,
+    prompt: input.prompt,
+    proposed_manifest: input.proposed_manifest,
+    diff_summary: input.diff_summary ?? null,
+    changed_pages: input.changed_pages ?? null,
+    status: 'open' as const,
+  };
+  const { data, error } = await client()
+    .from('manifex_pending_attempts')
+    .insert(row)
+    .select('*')
+    .single();
+  if (error) {
+    if (proposalsTableMissing(error)) return null;
+    throw new Error(`createProposal: ${error.message}`);
+  }
+  return rowToProposal(data);
+}
+
+export async function listOpenProposals(sessionId: string): Promise<PendingProposal[]> {
+  const { data, error } = await client()
+    .from('manifex_pending_attempts')
+    .select('*')
+    .eq('session_id', sessionId)
+    .eq('status', 'open')
+    .order('created_at', { ascending: false });
+  if (error) {
+    if (proposalsTableMissing(error)) return [];
+    console.warn('listOpenProposals failed:', error.message);
+    return [];
+  }
+  return (data || []).map(rowToProposal);
+}
+
+export async function getProposal(id: string): Promise<PendingProposal | null> {
+  const { data, error } = await client()
+    .from('manifex_pending_attempts')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) {
+    if (proposalsTableMissing(error)) return null;
+    throw new Error(`getProposal: ${error.message}`);
+  }
+  return data ? rowToProposal(data) : null;
+}
+
+export async function resolveProposal(id: string, status: Exclude<ProposalStatus, 'open'>, resolverId: string): Promise<PendingProposal | null> {
+  const { data, error } = await client()
+    .from('manifex_pending_attempts')
+    .update({ status, resolved_by: resolverId, resolved_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('status', 'open')
+    .select('*')
+    .single();
+  if (error) {
+    if (proposalsTableMissing(error)) return null;
+    throw new Error(`resolveProposal: ${error.message}`);
+  }
+  return data ? rowToProposal(data) : null;
+}
+
+export async function listProposalComments(proposalId: string): Promise<ProposalComment[]> {
+  const { data, error } = await client()
+    .from('manifex_proposal_comments')
+    .select('*')
+    .eq('proposal_id', proposalId)
+    .order('created_at', { ascending: true });
+  if (error) {
+    if (proposalsTableMissing(error)) return [];
+    console.warn('listProposalComments failed:', error.message);
+    return [];
+  }
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    proposal_id: row.proposal_id,
+    author_id: row.author_id,
+    body: row.body,
+    page_path: row.page_path ?? null,
+    section_slug: row.section_slug ?? null,
+    created_at: row.created_at,
+  }));
+}
+
+export async function createProposalComment(input: {
+  proposal_id: string;
+  author_id: string;
+  body: string;
+  page_path?: string | null;
+  section_slug?: string | null;
+}): Promise<ProposalComment | null> {
+  const { data, error } = await client()
+    .from('manifex_proposal_comments')
+    .insert({
+      proposal_id: input.proposal_id,
+      author_id: input.author_id,
+      body: input.body,
+      page_path: input.page_path ?? null,
+      section_slug: input.section_slug ?? null,
+    })
+    .select('*')
+    .single();
+  if (error) {
+    if (proposalsTableMissing(error)) return null;
+    throw new Error(`createProposalComment: ${error.message}`);
+  }
+  return {
+    id: data.id,
+    proposal_id: data.proposal_id,
+    author_id: data.author_id,
+    body: data.body,
+    page_path: data.page_path ?? null,
+    section_slug: data.section_slug ?? null,
+    created_at: data.created_at,
+  };
 }

@@ -102,6 +102,33 @@ export type TeamRole = 'owner' | 'editor' | 'viewer';
 
 export type BuildHistoryAction = 'accept' | 'undo' | 'redo' | 'forget' | 'retry';
 
+export type ProposalStatus = 'open' | 'accepted' | 'rejected' | 'withdrawn';
+
+export interface PendingProposal {
+  id: string;
+  session_id: string;
+  author_id: string;
+  base_sha: string;
+  prompt: string;
+  proposed_manifest: ManifestState;
+  diff_summary: string | null;
+  changed_pages: string[] | null;
+  status: ProposalStatus;
+  created_at: string;
+  resolved_by: string | null;
+  resolved_at: string | null;
+}
+
+export interface ProposalComment {
+  id: string;
+  proposal_id: string;
+  author_id: string;
+  body: string;
+  page_path: string | null;
+  section_slug: string | null;
+  created_at: string;
+}
+
 export interface BuildHistoryEntry {
   id: string;
   session_id: string;
