@@ -664,6 +664,15 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const changedPaths = new Set<string>(pending?.changed_pages || []);
   const busy = status !== 'idle';
 
+  // The starter manifest is the empty new-project state: a single 'overview'
+  // page with the boilerplate "Describe your app idea below…" content. We
+  // hide the preview pane in this state so undoing back to empty doesn't
+  // leave a stale Manifex marketing page in the iframe.
+  const isStarterManifest =
+    Object.keys(currentState.pages).length <= 1 &&
+    !!currentState.pages['overview'] &&
+    currentState.pages['overview'].content.includes('Describe your app idea below');
+
   // Ensure activePage is valid
   const effectiveActivePage = currentState.pages[activePage] ? activePage : (currentState.tree[0]?.path || Object.keys(currentState.pages)[0] || '');
 
@@ -1119,7 +1128,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         </div>
 
         {/* Right pane: App preview (hidden until first render, then slides in) */}
-        {(previewHtml || compiling) && (
+        {(previewHtml || compiling) && !isStarterManifest && (
         <div data-testid="preview-pane" className="mx-preview-reveal" style={{
           flex: '0 0 50%',
           display: 'flex',
