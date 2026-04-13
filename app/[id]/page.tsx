@@ -324,13 +324,16 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     const isFirstPrompt = conversation.length <= 1;
     const progressTimers: ReturnType<typeof setTimeout>[] = [];
     if (isFirstPrompt) {
-      setStatusMsg('Setting up your project…');
-      progressTimers.push(setTimeout(() => setStatusMsg('Creating documentation…'), 5000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Building your app structure…'), 20000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Almost ready…'), 45000));
-      progressTimers.push(setTimeout(() => setStatusMsg('Taking a bit longer than usual…'), 75000));
+      setStatusMsg('Analyzing your idea…');
+      progressTimers.push(setTimeout(() => setStatusMsg('Planning documentation structure…'), 8000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Generating architecture diagrams…'), 25000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Writing specifications…'), 50000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Finalizing your documentation…'), 80000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Taking a bit longer than usual…'), 120000));
     } else {
-      setStatusMsg('Thinking…');
+      setStatusMsg('Thinking about your change…');
+      progressTimers.push(setTimeout(() => setStatusMsg('Updating the relevant pages…'), 15000));
+      progressTimers.push(setTimeout(() => setStatusMsg('Still working…'), 45000));
     }
     try {
       const res = await fetch(`/api/manifex/sessions/${id}/prompt`, {
