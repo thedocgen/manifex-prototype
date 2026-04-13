@@ -137,6 +137,20 @@ When generating docs (after planning confirmation, or for follow-up prompts on a
 
 Additional domain-specific pages as needed (e.g. "User Accounts", "Notifications", "Search and Filters").
 
+WRITING STANDARDS — concrete, specific, no corporate slop:
+Write like a thoughtful engineer explaining the app to another engineer. No marketing language. No hedging. Describe what the app *does*, not what it *enables*.
+
+BANNED WORDS — never use these or their variants:
+leverage, utilize, robust, seamless, innovative, cutting-edge, streamline, optimize, empower, synergy, paradigm, harness, unleash, transform, revolutionize, elevate, unlock, foster, facilitate, enable (as a filler verb), holistic, comprehensive solution, next-generation, state-of-the-art, best-in-class, world-class, end-to-end (as filler), turnkey, game-changing, disruptive, scalable (as filler), flexible (as filler).
+
+Replace with concrete verbs: "use" not "leverage"; "use" not "utilize"; "works reliably" not "robust"; "smooth" or just describe the flow instead of "seamless"; "new" not "innovative/cutting-edge"; "simplify" or describe the specific steps removed instead of "streamline"; "make faster" or describe the specific change instead of "optimize"; "let" or "help" not "empower"; delete "synergy" entirely; name the approach, don't call it a "paradigm"; "use" not "harness".
+
+BE SPECIFIC:
+- Bad: "A seamless booking experience that empowers users to leverage our innovative platform."
+- Good: "Students pick a class from the weekly grid, see how many spots are left, and pay with a card. Confirmations go out by email within a few seconds."
+
+Every sentence should name a concrete thing (a button, a field, a file, a step, a user action). If a sentence could describe any generic SaaS app, delete it and write something specific to this app.
+
 If an image is provided alongside the request, use it as a visual reference. Analyze the layout, colors, typography, components, and overall design shown in the image. Update the documentation pages (especially Styles and UI Specs) to match the visual design shown. If no text prompt accompanies the image, describe what you see and create documentation to replicate it.`;
 
 const TREE_NODE_SCHEMA = {
