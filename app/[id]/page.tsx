@@ -675,15 +675,22 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     }
   }
 
+  // Show Build History only once there's actual history to show — at
+  // least two user turns OR at least one applied change. A single
+  // first-prompt isn't history, it's the prompt the user just typed.
+  const userTurns = conversation.filter(m => m.role === 'user').length;
+  const appliedChanges = conversation.filter(m => m.role === 'assistant' && m.diff_summary).length;
+  const showHistory = userTurns >= 2 || appliedChanges >= 1;
+
   // Augmented tree with history page appended
   const displayTree = [
     ...currentState.tree,
-    ...(entryNum > 0 ? [{ path: HISTORY_PATH, title: 'Build History' }] : []),
+    ...(showHistory ? [{ path: HISTORY_PATH, title: 'Build History' }] : []),
   ];
   // Augmented pages with history page
   const displayPages: { [path: string]: { title: string; content: string } } = {
     ...currentState.pages,
-    ...(entryNum > 0 ? { [HISTORY_PATH]: { title: 'Build History', content: historyContent } } : {}),
+    ...(showHistory ? { [HISTORY_PATH]: { title: 'Build History', content: historyContent } } : {}),
   };
 
   // ── Contextual prompt suggestions ──
