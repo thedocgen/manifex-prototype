@@ -1,7 +1,7 @@
 // Supabase-backed store for Manifex.
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex, ManifexTeam, ManifexTeamMember, TeamRole, BuildHistoryEntry, BuildHistoryAction, PendingProposal, ProposalStatus, ProposalComment, TeamInvite, PresenceEntry } from './types';
+import type { ManifexProject, ManifexSession, ManifestState, DocPage, TreeNode, CompiledCodex, CompiledProject, ProjectFiles, ManifexTeam, ManifexTeamMember, TeamRole, BuildHistoryEntry, BuildHistoryAction, PendingProposal, ProposalStatus, ProposalComment, TeamInvite, PresenceEntry } from './types';
 import { randomBytes } from 'crypto';
 import { LOCAL_DEV_TEAM, LOCAL_DEV_USER, migrateManifestState } from './types';
 import { sha256 } from './crypto';
@@ -250,6 +250,82 @@ export async function putCachedCompilation(
     });
   if (error) {
     console.warn('putCachedCompilation error:', error.message);
+  }
+}
+
+// Phase 2B project cache. Reuses the existing manifex_compilations.codex_files
+// JSONB column — no schema migration. The multi-file project's files map is
+// packed alongside three reserved keys that carry setup/run/port out of band:
+//   __manifex/setup.sh — the provisioning script
+//   __manifex/run.sh   — the dev-server launcher
+//   __manifex/port     — decimal port string
+// On read these reserved keys are stripped back out into the CompiledProject
+// top-level fields and the real files map is returned clean. Reserved keys
+// live under __manifex/ so they can't collide with user source paths; chunk 4's
+// render route additionally filters them before POSTing /__files to the devbox.
+
+const RESERVED_SETUP = '__manifex/setup.sh';
+const RESERVED_RUN = '__manifex/run.sh';
+const RESERVED_PORT = '__manifex/port';
+
+export async function getCachedProject(
+  manifestSha: string,
+  compilerVersion: string
+): Promise<CompiledProject | null> {
+  const { data, error } = await client()
+    .from('manifex_compilations')
+    .select('codex_files, manifest_sha')
+    .eq('manifest_sha', manifestSha)
+    .eq('compiler_version', compilerVersion)
+    .maybeSingle();
+  if (error) {
+    console.warn('getCachedProject error:', error.message);
+    return null;
+  }
+  if (!data) return null;
+  const packed = data.codex_files as Record<string, string> | null;
+  if (!packed) return null;
+  const setup = packed[RESERVED_SETUP];
+  const run = packed[RESERVED_RUN];
+  const portStr = packed[RESERVED_PORT];
+  if (typeof setup !== 'string' || typeof run !== 'string' || typeof portStr !== 'string') {
+    // Not a project-shaped cache row (probably a legacy codex entry under
+    // a different compiler_version). Treat as a miss rather than crashing.
+    return null;
+  }
+  const files: ProjectFiles = {};
+  for (const [k, v] of Object.entries(packed)) {
+    if (k === RESERVED_SETUP || k === RESERVED_RUN || k === RESERVED_PORT) continue;
+    files[k] = v;
+  }
+  return {
+    files,
+    setup,
+    run,
+    port: parseInt(portStr, 10) || 3000,
+    codex_sha: manifestSha,
+    compiler_version: compilerVersion,
+  };
+}
+
+export async function putCachedProject(
+  manifestSha: string,
+  compilerVersion: string,
+  project: CompiledProject
+): Promise<void> {
+  const packed: Record<string, string> = { ...project.files };
+  packed[RESERVED_SETUP] = project.setup;
+  packed[RESERVED_RUN] = project.run;
+  packed[RESERVED_PORT] = String(project.port);
+  const { error } = await client()
+    .from('manifex_compilations')
+    .upsert({
+      manifest_sha: manifestSha,
+      compiler_version: compilerVersion,
+      codex_files: packed,
+    });
+  if (error) {
+    console.warn('putCachedProject error:', error.message);
   }
 }
 

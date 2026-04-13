@@ -5,7 +5,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { sha256 } from './crypto';
 import { renderDiagramMarkers } from './diagram';
 import { buildConnectorsBlock } from './connectors';
-import type { CodexFiles, CompiledCodex, ManifestState, DocPage, TreeNode, Question, ConversationMessage } from './types';
+import type { CodexFiles, CompiledCodex, CompiledProject, ProjectFiles, ManifestState, DocPage, TreeNode, Question, ConversationMessage } from './types';
 import { serializePages } from './types';
 
 // Single source of truth for the compiler version. Bumping this string
@@ -14,6 +14,13 @@ import { serializePages } from './types';
 // of hard-coding it (we drifted to three different versions before
 // extracting this).
 export const COMPILER_VERSION = 'manifex-claude-sonnet-4-v6-budget-headroom';
+
+// Phase 2B multi-file project compiler. Separate cache namespace from the v6
+// single-HTML-blob compiler — bumping this string invalidates only the new
+// compileManifestToProject cache entries. v6 keeps its own key until chunk 4
+// of phase 2B removes it.
+export const PROJECT_COMPILER_VERSION = 'v7-multi-file';
+
 const MODEL = 'claude-sonnet-4-5-20250929';
 
 let _client: Anthropic | null = null;
@@ -965,5 +972,366 @@ export async function compileManifestToCodex(
     files,
     codex_sha: sha256(JSON.stringify(files)),
     compiler_version: COMPILER_VERSION,
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Phase 2B v7 multi-file project compiler.
+// ════════════════════════════════════════════════════════════════════════
+//
+// Emits a real multi-file project (Next.js 15 + Tailwind + SQLite + Drizzle
+// by default) plus a stack-agnostic setup.sh / run.sh pair that provisions
+// a blank Ubuntu 24.04 box into the running stack. Coexists with the v6
+// single-HTML-blob compiler above — chunk 4 of phase 2B will wire the new
+// render route into this function and deprecate v6.
+//
+// Architecture of the parallel emit:
+//
+//   Phase 1 (in parallel — no cross-deps):
+//     - SHELL role:  package.json, tsconfig.json, next.config.mjs,
+//                    tailwind.config.ts, postcss.config.mjs, app/layout.tsx,
+//                    app/globals.css, .gitignore
+//     - DATA role:   drizzle/schema.ts, lib/db.ts, drizzle.config.ts
+//     - INFRA role:  setup.sh, run.sh, port
+//
+//   Phase 2 (given phase 1 as context so imports resolve):
+//     - PAGES role:  app/page.tsx, app/**/route.ts, any subroute page.tsx,
+//                    and lib/actions.ts if the app needs server actions
+//
+// The roles are additive: each call emits its own slice of the files map,
+// we merge them at the end. INFRA's return also carries the setup/run/port
+// top-level fields on CompiledProject.
+
+function readEnvironmentPage(state: ManifestState): { content: string; hasPage: boolean } {
+  const candidates = ['environment', 'env', 'stack', 'runtime'];
+  for (const key of candidates) {
+    const p = state.pages[key];
+    if (p && p.content && p.content.trim().length > 0) {
+      return { content: p.content, hasPage: true };
+    }
+  }
+  return { content: '', hasPage: false };
+}
+
+const DEFAULT_STACK_DECLARATION = `Language: TypeScript
+Runtime: Node 20
+Framework: Next.js 15 (App Router, RSC, Server Actions enabled)
+Styling: Tailwind CSS v3 via PostCSS
+Database: SQLite (file: /app/workspace/data.db)
+ORM: Drizzle ORM + drizzle-kit (push mode, no migrations directory for v1)
+Package manager: npm (ships with apt-installed nodejs)
+Dev server port: 3000
+Dev command: next dev -p 3000`;
+
+function buildProjectCompilerSystem(state: ManifestState, secrets?: { [key: string]: string }): string {
+  const env = readEnvironmentPage(state);
+  const stackBlock = env.hasPage
+    ? `ENVIRONMENT (declared by the spec's Environment page — follow it literally):\n\n${env.content}\n\nIf the Environment page is silent on any detail below, fall back to the v1 default stack:\n\n${DEFAULT_STACK_DECLARATION}`
+    : `ENVIRONMENT (spec has no Environment page — use the v1 default stack):\n\n${DEFAULT_STACK_DECLARATION}`;
+
+  let secretsSection = '';
+  if (secrets && Object.keys(secrets).length > 0) {
+    secretsSection = `\n\nSECRETS AVAILABLE (inject these values into server-side code only — never into client bundles):
+${Object.entries(secrets).map(([k, v]) => `- ${k}: "${v}"`).join('\n')}`;
+  }
+
+  return `You are the Manifex v7 project compiler. You compile a multi-page documentation spec into a real, runnable multi-file project on a blank Ubuntu 24.04 box. The documentation IS the source of truth: read every page before deciding what to emit.
+
+${stackBlock}
+
+ABSOLUTE PRINCIPLES:
+- Every file you emit must be production-quality TypeScript. No TODO stubs, no "implement this later" comments, no placeholder routes returning 501.
+- The project must run with exactly: \`bash setup.sh && bash run.sh\`. No other manual steps. No interactive prompts.
+- Environment variables the app needs at runtime are written into a \`.env.local\` file by setup.sh (or committed directly if they're not secrets).
+- The dev server MUST bind to 0.0.0.0, not localhost — the devbox agent proxies to 127.0.0.1:<port> from inside the container but Next.js's default bind of localhost IPv6 can flake. Use \`next dev -H 0.0.0.0 -p 3000\`.
+- run.sh MUST write the dev server port as a decimal ASCII integer to \`/app/workspace/.manifex-port\` BEFORE exec'ing the dev server (so the agent's proxy can find it). Do this via \`echo 3000 > /app/workspace/.manifex-port\`.
+- Next.js projects MUST include a \`next.config.mjs\` with \`output: 'standalone'\` disabled (dev mode only this round) AND \`experimental.serverActions: { allowedOrigins: ['*'] }\` so the devbox's proxy hostname doesn't fail CSRF.
+- Tailwind config MUST \`content: ['./app/**/*.{ts,tsx}','./components/**/*.{ts,tsx}','./lib/**/*.{ts,tsx}']\`.
+- SQLite path MUST be \`/app/workspace/data.db\` (absolute). Drizzle \`better-sqlite3\` driver.
+- Drizzle: use \`drizzle-kit push\` in setup.sh after install (\`npx drizzle-kit push --config=drizzle.config.ts --force\`) so the schema lands before the dev server starts. NO migrations folder for v1.
+- Do NOT emit any file outside the workspace root. All paths in your output are RELATIVE, no leading slash, no \`..\`.
+- Do NOT emit node_modules, .next, or any build output. setup.sh generates those.
+- Do NOT emit package-lock.json — setup.sh generates one via \`npm install\`.
+
+QUALITY BAR (the rendered app must look Stripe/Linear/Notion-grade):
+- Typography: Inter font via next/font. Clear hierarchy (text-3xl/4xl font-bold tracking-tight headings, text-base leading-relaxed body text-slate-700).
+- Spacing: py-12 to py-20 section padding, max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 content wells, p-6 card padding.
+- Colors: slate neutrals + one accent from the Styles page. White / slate-50 alternating section backgrounds.
+- Cards: bg-white rounded-xl shadow-sm border border-slate-200, hover:shadow-md transition-shadow duration-200.
+- Buttons: rounded-lg px-4 py-2.5 font-medium, colored primary + slate-bordered secondary.
+- Forms: text-sm font-medium labels, rounded-lg focus:ring-2 inputs with validation states.
+- Never emit Lorem ipsum, never emit emojis (inline <svg> or geometric unicode instead — same rule as v6).
+- Responsive: mobile-first with sm: / md: / lg: breakpoints.
+- Empty states: never blank — helpful text, subtle icons, sample data.
+
+CONTENT RULES:
+- Every interactive element needs a stable \`data-action\` / \`data-role\` / \`data-field\` attribute so future tests can target it. kebab-case values.
+- Also emit \`data-doc-page\` / \`data-doc-section\` on major blocks so the visual-edit bridge can map rendered elements back to the spec.
+- Follow the documentation exactly. Do NOT invent features that aren't in the docs.${secretsSection}
+
+OUTPUT CONTRACT:
+You will receive role-specific instructions telling you which slice of the project to emit. Call the \`emit_project_section\` tool exactly once with the right fields for your role. DO NOT emit text outside the tool call.`;
+}
+
+const SHELL_PROJECT_ROLE = `
+YOUR ROLE: SHELL (project scaffolding, no app logic)
+
+Emit these files via emit_project_section.files:
+- package.json         — dependencies: next@^15, react@^19, react-dom@^19, tailwindcss@^3, postcss, autoprefixer, drizzle-orm, better-sqlite3, drizzle-kit, typescript, @types/node, @types/react, @types/react-dom, @types/better-sqlite3. "scripts": { "dev": "next dev -H 0.0.0.0 -p 3000", "build": "next build", "start": "next start -H 0.0.0.0 -p 3000" }. No optional fields. No lockfile.
+- tsconfig.json        — Standard Next.js 15 App Router tsconfig (strict, ESNext module, bundler moduleResolution, jsx preserve, include ["next-env.d.ts","**/*.ts","**/*.tsx",".next/types/**/*.ts"]).
+- next.config.mjs      — \`export default { experimental: { serverActions: { allowedOrigins: ['*'] } } }\`
+- tailwind.config.ts   — content globs per system rules above, theme extend with Inter font family.
+- postcss.config.mjs   — tailwindcss + autoprefixer
+- app/layout.tsx       — root layout: loads Inter via next/font/google, imports ./globals.css, wraps children in <html lang="en"> <body className="min-h-screen bg-white font-sans antialiased text-slate-900">.
+- app/globals.css      — @tailwind base/components/utilities; :root custom properties for the palette declared on the Styles page.
+- .gitignore           — node_modules, .next, data.db, .env.local, .manifex-port
+
+Do NOT emit app/page.tsx, app/**/route.ts, lib/*, drizzle/*, or any setup/run scripts. Those belong to other roles.`;
+
+const DATA_PROJECT_ROLE = `
+YOUR ROLE: DATA (schema + db client + drizzle config)
+
+Emit these files via emit_project_section.files:
+- drizzle/schema.ts    — Drizzle schema tables describing every entity the documentation's Data Model / data storage page declares. Use better-sqlite3 driver (sqliteTable from drizzle-orm/sqlite-core). Each table exports its inferred Select/Insert types: \`export type Foo = typeof foo.$inferSelect; export type NewFoo = typeof foo.$inferInsert;\`. Include createdAt timestamps (integer mode: 'timestamp') with \`$defaultFn(() => new Date())\`.
+- lib/db.ts            — Exports a shared Drizzle client: \`import Database from 'better-sqlite3'; import { drizzle } from 'drizzle-orm/better-sqlite3'; import * as schema from '@/drizzle/schema'; const sqlite = new Database('/app/workspace/data.db'); export const db = drizzle(sqlite, { schema });\`. Also re-export \`schema\`.
+- drizzle.config.ts    — \`export default { schema: './drizzle/schema.ts', out: './drizzle', dialect: 'sqlite', dbCredentials: { url: '/app/workspace/data.db' } } satisfies Config\` (import Config from 'drizzle-kit').
+- lib/seed.ts          — Idempotent seed helper: imports db + schema, checks row count, inserts 3-8 realistic sample rows into each primary table if empty. Use real-looking content appropriate to the documented domain, not Lorem ipsum. Exports a \`seed()\` async function that returns a summary.
+
+If the app has NO persistent data (pure static landing page, for example), still emit a minimal schema.ts with at least a \`_ping\` table and a no-op seed — this keeps setup.sh's drizzle-kit push step consistent across all projects.`;
+
+const INFRA_PROJECT_ROLE = `
+YOUR ROLE: INFRA (setup + run scripts + port number)
+
+Emit the following via emit_project_section:
+- setup: a full bash script string that provisions a blank Ubuntu 24.04 box (running as root, /app/workspace is cwd) into a working Next.js dev environment. Required steps in order:
+    1. \`set -euo pipefail\`
+    2. \`export DEBIAN_FRONTEND=noninteractive\`
+    3. \`apt-get update\`
+    4. \`apt-get install -y --no-install-recommends build-essential python3 ca-certificates\` (better-sqlite3 needs build tools; node is already on the image)
+    5. \`apt-get clean && rm -rf /var/lib/apt/lists/*\`
+    6. \`echo "[setup] installing npm dependencies…" && npm install --no-audit --no-fund --loglevel=error\`
+    7. \`echo "[setup] pushing drizzle schema…" && npx drizzle-kit push --config=drizzle.config.ts --force\`
+    8. \`echo "[setup] seeding database…" && node --input-type=module -e "import('./lib/seed.ts').then(m => m.seed()).then(r => console.log(JSON.stringify(r))).catch(e => { console.error(e); process.exit(1); })"\` (OR call via tsx/ts-node if import of .ts fails; use whichever the rest of the toolchain supports — if in doubt, skip the seed step here and rely on the app creating its own demo data on first request)
+    9. \`echo "[setup] complete"\`
+    setup.sh MUST be re-runnable — steps 6-8 should be idempotent. If a step typically takes a while, emit a human-readable echo before it so the /__logs stream shows progress.
+
+- run: a bash script string that STARTS the dev server and writes its port. Required steps in order:
+    1. \`set -euo pipefail\`
+    2. \`echo 3000 > /app/workspace/.manifex-port\`
+    3. \`exec npx next dev -H 0.0.0.0 -p 3000\`
+    Do NOT background the dev server (\`&\`). The agent's /__exec detach=true mode handles backgrounding. run.sh must block on the dev server so agent logs keep flowing.
+
+- port: the integer 3000 (or whatever port run.sh binds — they MUST match).
+
+Do NOT emit any files in this role. files should be {} or omitted. setup/run/port are the only outputs.`;
+
+const PAGES_PROJECT_ROLE = `
+YOUR ROLE: PAGES (all app/ routes, server actions, UI components)
+
+You are running AFTER the SHELL and DATA roles have finished. A \`PHASE 1 CONTEXT\` block below shows exactly what they emitted — in particular the Drizzle schema in drizzle/schema.ts and the db client at lib/db.ts. Your imports MUST match those exports literally.
+
+Emit these files via emit_project_section.files:
+- app/page.tsx              — the home route. Server Component by default. Query the db via the exported client, render real data, use Tailwind for styling.
+- app/**/page.tsx           — every additional route the docs describe (dashboard, list views, detail views, etc.). One file per documented page. Use App Router folder conventions (app/expenses/page.tsx, app/expenses/[id]/page.tsx, etc).
+- app/api/*/route.ts        — API handlers if the docs call for JSON endpoints (GET/POST/PATCH/DELETE handlers as named exports).
+- lib/actions.ts            — all server actions ('use server' at file top). Each exported function takes FormData or typed args, mutates the db via the shared client, and returns a simple success/error shape. Use \`revalidatePath\` after mutations.
+- components/*.tsx          — shared client components (forms with useFormState, interactive widgets, nav). Mark with 'use client' only when state/effects required.
+- app/not-found.tsx         — simple 404 page styled consistently.
+
+Import the db via \`import { db, schema } from '@/lib/db'\`. Import server actions via \`import { createFoo, deleteFoo } from '@/lib/actions'\`.
+
+Do NOT re-emit any file that SHELL or DATA already emitted. Every file you emit is ADDITIVE to their output and must not collide. If you need a config adjustment (e.g. a tailwind plugin), add it to tailwind.config.ts by re-emitting ONLY that one path as a complete replacement.`;
+
+// Tool spec for the v7 project compiler. files is an open-ended object
+// mapping project-relative paths to full file contents. setup/run/port
+// are only meaningful in the INFRA role but are kept on every call's
+// schema for symmetry; the role prompts gate which fields get used.
+const EMIT_PROJECT_SECTION_TOOL = {
+  name: 'emit_project_section',
+  description: 'Emit a slice of the multi-file project. files is a path→content map for the files this role owns. setup/run/port are only emitted by the INFRA role.',
+  input_schema: {
+    type: 'object' as const,
+    properties: {
+      files: {
+        type: 'object' as const,
+        description: 'Project-relative path → full file content for every file this role owns. Keys are POSIX paths without a leading slash.',
+        additionalProperties: { type: 'string' as const },
+      },
+      setup: { type: 'string' as const, description: 'Full bash script provisioning a blank Ubuntu box. INFRA role only.' },
+      run: { type: 'string' as const, description: 'Full bash script starting the dev server. INFRA role only.' },
+      port: { type: 'integer' as const, description: 'Dev server port. INFRA role only.' },
+    },
+    required: ['files' as const],
+  },
+};
+
+interface ProjectSectionResult {
+  files: ProjectFiles;
+  setup?: string;
+  run?: string;
+  port?: number;
+}
+
+async function emitProjectSection(
+  label: string,
+  sharedSystem: string,
+  roleSystem: string,
+  serialized: string,
+  maxTokens: number,
+  extraUserContext?: string,
+): Promise<ProjectSectionResult> {
+  const userContent = extraUserContext
+    ? `${extraUserContext}\n\nDOCUMENTATION PAGES:\n\n${serialized}\n\nEmit the ${label} section now by calling emit_project_section.`
+    : `DOCUMENTATION PAGES:\n\n${serialized}\n\nEmit the ${label} section now by calling emit_project_section.`;
+
+  const SDK_MAX_NON_STREAMING = 21000;
+  const attempt = async (budget: number) => {
+    const resp = await client().messages.create({
+      model: MODEL,
+      max_tokens: budget,
+      temperature: 0,
+      system: sharedSystem + '\n' + roleSystem,
+      tools: [EMIT_PROJECT_SECTION_TOOL],
+      tool_choice: { type: 'tool', name: 'emit_project_section' },
+      messages: [{ role: 'user', content: userContent }],
+    });
+    const toolUse = resp.content.find(b => b.type === 'tool_use');
+    if (!toolUse || toolUse.type !== 'tool_use') {
+      throw new Error(`[${label}] LLM did not call emit_project_section (stop_reason: ${resp.stop_reason})`);
+    }
+    const input = toolUse.input as ProjectSectionResult;
+    return { input, stopReason: resp.stop_reason };
+  };
+
+  let r = await attempt(maxTokens);
+  const filesEmpty = !r.input.files || Object.keys(r.input.files).length === 0;
+  const missingInfra = label === 'INFRA' && (!r.input.setup || !r.input.run || !r.input.port);
+  const shouldRetry = r.stopReason === 'max_tokens' || (label !== 'INFRA' && filesEmpty) || missingInfra;
+  if (shouldRetry) {
+    const retryBudget = Math.min(SDK_MAX_NON_STREAMING, Math.max(maxTokens, 8000) + 8000);
+    if (retryBudget > maxTokens) {
+      console.warn(`[${label}] retry at ${retryBudget} (stop_reason=${r.stopReason}, files=${Object.keys(r.input.files || {}).length})`);
+      r = await attempt(retryBudget);
+    }
+  }
+
+  const files = r.input.files || {};
+  const out: ProjectSectionResult = { files };
+  if (typeof r.input.setup === 'string') out.setup = r.input.setup;
+  if (typeof r.input.run === 'string') out.run = r.input.run;
+  if (typeof r.input.port === 'number' && Number.isFinite(r.input.port)) out.port = r.input.port;
+
+  // Sanity-check paths: reject leading-slash, '..', or reserved __manifex/ keys.
+  for (const p of Object.keys(files)) {
+    if (p.startsWith('/') || p.includes('..') || p.startsWith('__manifex/')) {
+      throw new Error(`[${label}] illegal file path: ${p}`);
+    }
+    if (typeof files[p] !== 'string') {
+      throw new Error(`[${label}] file ${p} has non-string content`);
+    }
+  }
+
+  if (label === 'INFRA' && (!out.setup || !out.run || !out.port)) {
+    throw new Error(`[${label}] incomplete infra payload: setup=${!!out.setup}, run=${!!out.run}, port=${out.port}`);
+  }
+  if (label !== 'INFRA' && Object.keys(files).length === 0) {
+    throw new Error(`[${label}] emitted zero files`);
+  }
+  return out;
+}
+
+function summarizePhase1ForPages(shell: ProjectFiles, data: ProjectFiles): string {
+  const pick = (files: ProjectFiles, path: string): string | null => {
+    const v = files[path];
+    return typeof v === 'string' ? v : null;
+  };
+  const schema = pick(data, 'drizzle/schema.ts');
+  const dbClient = pick(data, 'lib/db.ts');
+  const pkg = pick(shell, 'package.json');
+  const lines: string[] = ['PHASE 1 CONTEXT — files the SHELL and DATA roles already emitted.'];
+  lines.push('Your imports MUST line up with what these files actually export. Do not restate or re-emit them.');
+  lines.push('');
+  if (pkg) {
+    lines.push('── package.json ──');
+    lines.push(pkg);
+    lines.push('');
+  }
+  if (schema) {
+    lines.push('── drizzle/schema.ts ──');
+    lines.push(schema);
+    lines.push('');
+  }
+  if (dbClient) {
+    lines.push('── lib/db.ts ──');
+    lines.push(dbClient);
+    lines.push('');
+  }
+  const shellPaths = Object.keys(shell).filter(p => p !== 'package.json').sort();
+  const dataPaths = Object.keys(data).filter(p => p !== 'drizzle/schema.ts' && p !== 'lib/db.ts').sort();
+  if (shellPaths.length > 0) {
+    lines.push('── other SHELL files (already written — do not re-emit) ──');
+    for (const p of shellPaths) lines.push(`  ${p}`);
+    lines.push('');
+  }
+  if (dataPaths.length > 0) {
+    lines.push('── other DATA files (already written — do not re-emit) ──');
+    for (const p of dataPaths) lines.push(`  ${p}`);
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+export async function compileManifestToProject(
+  state: ManifestState,
+  secrets?: { [key: string]: string }
+): Promise<CompiledProject> {
+  const serialized = serializePages(state);
+  const sharedSystem = buildProjectCompilerSystem(state, secrets);
+
+  // Phase 1: SHELL + DATA + INFRA in parallel. No cross-deps — each role
+  // owns a disjoint set of paths and INFRA's scripts only need to reference
+  // filenames, not file contents.
+  const started = Date.now();
+  const [shellSection, dataSection, infraSection] = await Promise.all([
+    emitProjectSection('SHELL', sharedSystem, SHELL_PROJECT_ROLE, serialized, 12000),
+    emitProjectSection('DATA', sharedSystem, DATA_PROJECT_ROLE, serialized, 10000),
+    emitProjectSection('INFRA', sharedSystem, INFRA_PROJECT_ROLE, serialized, 4000),
+  ]);
+  const phase1Ms = Date.now() - started;
+
+  // Phase 2: PAGES, given phase 1 as literal context so imports line up.
+  const phase1Summary = summarizePhase1ForPages(shellSection.files, dataSection.files);
+  const pagesSection = await emitProjectSection(
+    'PAGES',
+    sharedSystem,
+    PAGES_PROJECT_ROLE,
+    serialized,
+    18000,
+    phase1Summary,
+  );
+  const phase2Ms = Date.now() - started - phase1Ms;
+
+  // Merge, with phase 2 allowed to overwrite phase 1 for the narrow
+  // "adjust tailwind.config.ts" escape hatch the PAGES prompt permits.
+  const files: ProjectFiles = {
+    ...shellSection.files,
+    ...dataSection.files,
+    ...pagesSection.files,
+  };
+
+  const setup = infraSection.setup!;
+  const run = infraSection.run!;
+  const port = infraSection.port!;
+
+  const totalMs = Date.now() - started;
+  console.log(`[v7-compile] finished in ${totalMs}ms (phase1 ${phase1Ms}ms, phase2 ${phase2Ms}ms, files=${Object.keys(files).length}, port=${port})`);
+
+  return {
+    files,
+    setup,
+    run,
+    port,
+    codex_sha: sha256(JSON.stringify({ files, setup, run, port })),
+    compiler_version: PROJECT_COMPILER_VERSION,
   };
 }

@@ -98,6 +98,23 @@ export interface CompiledCodex {
   compiler_version: string;
 }
 
+// Phase 2B multi-file project shape. Coexists with CompiledCodex during
+// the 2A→2B transition: v6 render route still consumes CompiledCodex,
+// v7+ render route (chunk 4) will consume CompiledProject. The new
+// shape is stack-agnostic — files is an arbitrary path→content map,
+// setup/run are the bash scripts the devbox agent executes, and port
+// is the dev-server port the agent will proxy to.
+export type ProjectFiles = Record<string, string>;
+
+export interface CompiledProject {
+  files: ProjectFiles;
+  setup: string;
+  run: string;
+  port: number;
+  codex_sha: string;
+  compiler_version: string;
+}
+
 export const LOCAL_DEV_USER = {
   id: 'local-dev-user',
   name: 'Local Developer',
