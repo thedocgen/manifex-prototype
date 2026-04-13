@@ -493,6 +493,27 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const renderInBackground = async () => {
     setCompiling(true);
     setPreviewError(null);
+
+    // Phase 2A: ensure a Fly devbox exists for this session BEFORE the
+    // compile fires. Idempotent on the server. The render route's
+    // pushToDevboxIfPresent helper reads session.manifest_state.devbox
+    // when /__sync'ing, so we need to make sure our local session state
+    // and the DB row both have devbox populated by the time /render
+    // runs. The POST returns the updated session — apply it locally so
+    // the iframe can switch from srcdoc to the devbox URL immediately.
+    try {
+      const dbRes = await fetch(`/api/manifex/sessions/${id}/devbox`, { method: 'POST' });
+      if (dbRes.ok) {
+        const dbData = await dbRes.json();
+        if (dbData?.session) setSession(dbData.session);
+      } else if (dbRes.status === 503) {
+        const dbErr = await dbRes.json().catch(() => ({}));
+        setPreviewError(dbErr?.error || 'Too many devboxes are running. Stop one before opening another.');
+        setCompiling(false);
+        return;
+      }
+    } catch {} // devbox provisioning failure is non-fatal — fall back to srcdoc
+
     // Show a skeleton wireframe immediately so the user sees something while
     // the LLM compile runs. Replaced with the real HTML when /render returns.
     // We base the skeleton on the manifest the compile is about to operate
@@ -1499,7 +1520,34 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
               </div>
             ) : previewHtml ? (
               <div style={{ position: 'relative', width: '100%', height: '100%' }}>
-                <iframe ref={iframeRef} data-testid="preview-iframe" srcDoc={previewHtml + PREVIEW_BRIDGE_SCRIPT} style={{ width: '100%', height: '100%', border: 'none' }} />
+                {(() => {
+                  // Phase 2A: when the session has a Fly devbox provisioned,
+                  // point the iframe at its public URL via src= and let the
+                  // devbox's /__events SSE stream drive reloads on every
+                  // /__sync from the render route. Falls back to the
+                  // srcDoc/PREVIEW_BRIDGE_SCRIPT path for sessions without
+                  // a devbox (legacy + offline dev).
+                  const devbox = (session?.manifest_state as any)?.devbox;
+                  if (devbox?.url) {
+                    return (
+                      <iframe
+                        ref={iframeRef}
+                        data-testid="preview-iframe"
+                        data-devbox-url={devbox.url}
+                        src={devbox.url}
+                        style={{ width: '100%', height: '100%', border: 'none' }}
+                      />
+                    );
+                  }
+                  return (
+                    <iframe
+                      ref={iframeRef}
+                      data-testid="preview-iframe"
+                      srcDoc={previewHtml + PREVIEW_BRIDGE_SCRIPT}
+                      style={{ width: '100%', height: '100%', border: 'none' }}
+                    />
+                  );
+                })()}
                 {validateResult && (
                   <div
                     data-testid="validate-results"

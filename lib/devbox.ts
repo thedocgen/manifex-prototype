@@ -85,19 +85,17 @@ async function listMachines(appName: string): Promise<FlyMachine[]> {
 }
 
 /**
- * How many devbox apps are currently active (have at least one machine in
- * a started/starting state). Used for the cap check before creation.
+ * How many devbox apps currently exist for the personal org. The cap is
+ * enforced on PROVISIONED apps, not running machines — Fly auto-stops idle
+ * machines after their grace period, but a stopped session still occupies
+ * an app slot until /devbox DELETE explicitly destroys it.
+ *
+ * Counting started-only would let an unbounded number of apps accumulate
+ * as long as fewer than 3 were running at any instant — defeating the cap.
  */
 export async function countActiveDevboxes(): Promise<number> {
   const apps = await listDevboxApps();
-  let active = 0;
-  for (const appName of apps) {
-    try {
-      const machines = await listMachines(appName);
-      if (machines.some(m => /start|running/i.test(m.state || ''))) active++;
-    } catch {}
-  }
-  return active;
+  return apps.length;
 }
 
 /**
