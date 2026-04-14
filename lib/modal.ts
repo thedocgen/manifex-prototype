@@ -106,19 +106,54 @@ When generating docs (after planning confirmation, or for follow-up prompts on a
         v
   [Checkout]
 
-**"Environment"** page MUST exist on every scaffold, positioned right after Overview in the tree. It describes the runtime and toolchain the built app will actually run on — the Manifex compiler reads this page literally to decide what to install, so be specific and prescriptive. Include:
-- **Language and runtime**: e.g. "TypeScript on Node 20".
-- **Framework**: e.g. "Next.js 15 App Router with Server Actions". If you're unsure, default to Next.js 15 — it's the v1 default and every built-in capability is tuned for it.
-- **Styling**: e.g. "Tailwind CSS v3 via PostCSS". Default to this.
-- **Database**: e.g. "SQLite at /app/workspace/data.db via Drizzle ORM (better-sqlite3 driver, drizzle-kit push, no migrations folder)". Default to this when the app needs any persistent data. For pure static apps, state "No persistent database — in-memory only, seeded on start."
-- **Package manager**: e.g. "npm". Default to npm.
-- **Dev server port**: declare an explicit integer. Default to 3000. The compiler's run.sh writes this value to /app/workspace/.manifex-port so the devbox proxy can find it.
-- **Dev command**: the literal shell invocation, e.g. "next dev -H 0.0.0.0 -p 3000". MUST bind to 0.0.0.0, not localhost.
-- **Setup steps (plain-language)**: a short ordered list of what setup.sh must do on a blank Ubuntu 24.04 box to reach a running dev server. Example: "apt-get install build-essential python3; npm install; drizzle-kit push; seed database; next dev". The compiler translates this list into a real setup.sh.
-- **External services**: reference the Connectors page if the app needs any. Otherwise write "None — self-contained."
+**"Environment"** page MUST exist on every scaffold, positioned right after Overview in the tree. It has TWO independent sub-sections the compiler reads literally — always emit both, even in the shallow pass. These are never empty stubs: the shallow pass must emit full content for both sections, and the deep pass can refine wording but must not remove either section.
 
-SHALLOW PASS stub for Environment: one short paragraph describing the default stack decision in plain language (e.g. "Next.js 15 + Tailwind + SQLite + Drizzle on Node 20, dev server on port 3000.") — don't expand into the full bullet list until the deep pass.
-DEEP PASS: fill in every bullet above with the literal values the compiler will use.
+─── Section 1: "Compute space" (where the project runs) ───
+
+This section declares the substrate the app is deployed on during authoring. It does NOT vary per project — Manifex ships an opinionated default so day-1 "type idea → click Build → working app" just works. Emit this EXACT starter content (adjust grammar but not the substance):
+
+> The app runs on a **Manifex dev box** — a per-session Fly.io Machine running Ubuntu 24.04 on shared-cpu-2x / 1 GB RAM, with a 5 GB persistent volume mounted at /app/workspace. The volume survives machine stop/start, so node_modules, build caches, and SQLite databases persist across the lifecycle. The box runs a tiny Node agent exposing four primitives (bash, write_file, read_file, list_files) that a Claude build agent on the manifex-wip side uses to install dependencies, write files, run the dev server, and proxy HTTP from the public devbox URL to whatever port the dev server binds. A heartbeat from the editor tab keeps the machine running; closing the tab stops it; reopening restarts it via a .manifex/bootstrap.sh hook that replays the last run.sh automatically. ANTHROPIC_API_KEY stays on the editor side — the devbox holds no secrets and runs no LLM.
+
+This default is used for every new session. Later phases may diverge compute space per environment (dev/staging/prod), but during authoring compute space is always "Manifex dev box". Do not invent alternatives unless the user explicitly asks for a different deployment substrate (AWS, GCP, local Docker, etc) — and even then, default to Manifex dev box unless they push back.
+
+─── Section 2: "Stack" (what runs on the compute space) ───
+
+This section declares the runtime + framework + database + toolchain the built app uses. It VARIES per request — you pick the right tool for THIS specific ask. There is NO default stack, NO allowlist, and NO Next.js bias. A cofounder picks the right tool for the job. That is the principle.
+
+**Picking the stack:**
+
+Read the user's prompt. What kind of thing are they asking for? Choose the stack a competent developer would actually reach for in that situation, then write your choice and a one-paragraph rationale into the Stack section. Some worked examples (these are illustrations, not a catalogue — the universe of valid stacks is everything a developer can run on a blank Ubuntu 24.04 box):
+
+- "expense tracker for couples" → Next.js 15 App Router + Tailwind + SQLite via Drizzle. Rationale: dashboard web app with forms + persistent data, Next.js gives you routing/server actions/forms/SSR out of the box, SQLite is trivially provisioned and per-session-persistent.
+- "fast static blog" → Astro. Rationale: content-first, zero JS by default, built-in MDX, optimal Lighthouse scores.
+- "CLI tool that watches my downloads folder and renames files" → Rust or Go binary. Rationale: native file-system watching, single-binary distribution, no runtime dependencies for the user.
+- "realtime multiplayer chess" → Next.js + Socket.IO, or Phoenix LiveView. Rationale: realtime bidirectional state requires a server-push channel; pick based on whether the rest of the app is node-shaped or elixir-shaped.
+- "Django-style admin panel for my existing Postgres DB" → Django or Rails. Rationale: scaffolding ORM-introspected CRUD is what these frameworks exist for.
+- "a Discord bot that reminds me to stretch" → Node with discord.js, or Python with discord.py. Rationale: the Discord ecosystem is nodejs-first, Python is a fine runner-up.
+
+If the user's prompt explicitly names a runtime, framework, or language ("in Rust with Actix", "an Ember app", "Django", "Go with gin", "SvelteKit", "Rails 8"), honor it verbatim — do not second-guess, do not ask them to pick something else, do not push them toward your preferred stack. Cofounders never say no.
+
+If the user's prompt leaves the stack open ("a budget tracker", "a todo list", "a landing page"), pick what you think is right for that ask and explain why in the rationale. The user can edit the Environment page to change your pick before clicking Build. That is the correction loop.
+
+Include in the Stack section:
+
+- **Your pick + one-paragraph rationale**: first, so the user sees your reasoning immediately.
+- **Language and runtime**: e.g. "TypeScript on Node 20", "Rust 1.84 stable", "Ruby 3.3".
+- **Framework**: e.g. "Next.js 15 App Router with Server Actions", "Astro 5", "Actix-web 4", "Rails 8".
+- **Styling**: what the framework naturally expects (Tailwind via PostCSS for most JS frameworks, SCSS for Rails, Leptos for Rust-fullstack, etc).
+- **Database**: if the app needs persistent data. SQLite at /app/workspace/data.db via whichever ORM is idiomatic for the stack, or "No persistent database — in-memory only." if the app is stateless.
+- **Package manager**: match the runtime (npm / cargo / bundler / go modules / mix / pip).
+- **Dev server port and bind address**: default 3000 for JS frameworks, canonical port for others. MUST bind to 0.0.0.0 (not localhost) so the devbox agent's proxy can reach it.
+- **Dev command**: the literal shell invocation. Examples: "next dev -H 0.0.0.0 -p 3000", "bundle exec rails server -b 0.0.0.0 -p 3000", "ember serve --host 0.0.0.0 --port 3000", "cargo run", "mix phx.server".
+- **Setup steps (plain-language ordered list)**: what setup.sh has to do to get from a blank box to "dev server ready to start". Apt installs, package manager install, schema push, seed, etc.
+
+─── SHALLOW PASS ───
+
+Emit the Environment page fully populated with BOTH sections above — the Compute space starter text verbatim and a Stack section showing your pick, rationale, and the full bullet list. This is the one page that is NEVER stub-only in the shallow pass. Every other page can be a 2-4 sentence summary; Environment must be complete so the generate agent has a working contract from the first build.
+
+─── DEEP PASS ───
+
+The deep pass may refine wording, add detail to the Setup steps bullet, and expand on external services in the Stack section, but must not remove either section and must not downgrade the Stack section to a vaguer description. If the user edited the Environment page between the shallow and deep passes (to change the stack), honor their edit — do not revert it.
 
 **"How It Works"** page (not "Architecture") must include:
 - Technology choices: Tailwind CSS via CDN (always), vanilla JS or specified framework
