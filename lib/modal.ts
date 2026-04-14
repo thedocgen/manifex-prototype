@@ -619,13 +619,100 @@ export async function editManifest(
     if (!input.pages || typeof input.pages !== 'object') throw new Error('LLM returned no pages');
     if (!input.tree || !Array.isArray(input.tree)) throw new Error('LLM returned no tree');
 
-    const pages: { [path: string]: DocPage } = {};
+    // Deserialize the LLM's emitted pages into the canonical DocPage shape.
+    const llmPages: { [path: string]: DocPage } = {};
     for (const [path, page] of Object.entries(input.pages)) {
       if (page && typeof page.title === 'string' && typeof page.content === 'string') {
-        pages[path] = { title: page.title, content: await renderDiagramMarkers(page.content) };
+        llmPages[path] = { title: page.title, content: await renderDiagramMarkers(page.content) };
       }
     }
-    if (Object.keys(pages).length === 0) throw new Error('LLM returned empty pages');
+    if (Object.keys(llmPages).length === 0) throw new Error('LLM returned empty pages');
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase 3 fix: preserve unchanged pages from currentState
+    // ─────────────────────────────────────────────────────────────────────
+    //
+    // The deep pass repeatedly violates the system prompt rule "Return ALL
+    // pages, not just changed ones. Unchanged pages must be included as-is"
+    // when the user requests a narrow edit. Symptom: pages NOT listed in
+    // changed_pages come back as 200-300 char shallow stubs, collapsing the
+    // entire spec on every minor doc edit. This is the bug that blocked
+    // the Manifex-on-Manifex bug-fix-via-prompt-bar test.
+    //
+    // The fix is to TRUST currentState as the base and only apply diffs
+    // from llmPages for paths the LLM explicitly claimed to change. Pages
+    // the LLM emitted that ARE in changed_pages are applied. Pages it
+    // emitted that ARE NOT in changed_pages are discarded in favour of the
+    // existing content. New pages (in llmPages, not in currentState, AND
+    // in changed_pages) are added. Deletions (in changed_pages, not in
+    // llmPages) remove the entry.
+    //
+    // Plus a defensive length-regression check: even for pages the LLM
+    // claims to have intentionally edited, if the new content is under
+    // 300 chars (the shallow stub cap) and the existing content was over
+    // 1000 chars, that's almost certainly the shallow draft leaking
+    // through and we preserve the original. The model will get a chance
+    // to actually rewrite the page on the next prompt.
+    const claimedChanged = Array.isArray(input.changed_pages) ? input.changed_pages : [];
+    const changedSet = new Set(claimedChanged);
+    const merged: { [path: string]: DocPage } = {};
+    const preservedPaths: string[] = [];
+    const collapsedPaths: string[] = [];
+
+    // Start from the existing manifest — every current page survives
+    // unless explicitly changed.
+    for (const [path, page] of Object.entries(currentState.pages || {})) {
+      merged[path] = page;
+    }
+
+    // Apply LLM edits only where the LLM claimed a change.
+    for (const path of Object.keys(llmPages)) {
+      if (changedSet.has(path)) {
+        const incoming = llmPages[path];
+        const existing = currentState.pages?.[path];
+        if (
+          existing &&
+          existing.content.length > 1000 &&
+          incoming.content.length < 300
+        ) {
+          // Length-regression guard: shallow-stub leak. Keep the existing
+          // page and record the path so the final merge_warnings array
+          // surfaces what we caught.
+          collapsedPaths.push(path);
+          merged[path] = existing;
+        } else {
+          merged[path] = incoming;
+        }
+      } else if (!merged[path]) {
+        // Brand-new page the LLM emitted but didn't list in changed_pages.
+        // Treat as additive and accept it.
+        merged[path] = llmPages[path];
+      } else {
+        // LLM emitted this page but did NOT claim a change. Preserve the
+        // existing copy regardless of what was emitted.
+        preservedPaths.push(path);
+      }
+    }
+
+    // Handle deletions: paths the LLM listed as changed but didn't emit
+    // are removed from the merged manifest.
+    for (const path of changedSet) {
+      if (!(path in llmPages)) {
+        delete merged[path];
+      }
+    }
+
+    if (preservedPaths.length > 0 || collapsedPaths.length > 0) {
+      console.log(
+        `[editManifest] merge protected ${preservedPaths.length} unchanged page(s)` +
+          (preservedPaths.length > 0 ? `: ${preservedPaths.join(', ')}` : '') +
+          (collapsedPaths.length > 0
+            ? ` and rejected ${collapsedPaths.length} length-regression(s): ${collapsedPaths.join(', ')}`
+            : '')
+      );
+    }
+
+    const pages = merged;
 
     function validateTree(nodes: any[]): TreeNode[] {
       return nodes
