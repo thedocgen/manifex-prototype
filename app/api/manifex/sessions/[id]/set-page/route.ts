@@ -44,7 +44,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     else newTree.push(node);
   }
 
-  const newManifestState = makeManifestState(newPages, newTree);
+  const baseManifestState = makeManifestState(newPages, newTree);
+  // Preserve session-scoped fields that don't belong to (pages, tree, sha)
+  // but live on manifest_state for legacy reasons: devbox attachment and
+  // the v7-pivot generate_cache. makeManifestState only knows about the
+  // canonical core, so we have to merge the rest back in by hand or
+  // every set-page call would orphan the generate cache and the attached
+  // devbox pointer.
+  const newManifestState: typeof session.manifest_state = {
+    ...baseManifestState,
+  };
+  const prior = session.manifest_state as any;
+  if (prior?.devbox) (newManifestState as any).devbox = prior.devbox;
+  if (prior?.generate_cache) (newManifestState as any).generate_cache = prior.generate_cache;
+  if (prior?.conversation) (newManifestState as any).conversation = prior.conversation;
   const updated = await updateSession(id, { manifest_state: newManifestState });
   return NextResponse.json({ ok: true, session: updated, sha: newManifestState.sha });
 }
