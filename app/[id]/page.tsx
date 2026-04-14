@@ -730,38 +730,77 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     } catch {} // skeleton failures are non-fatal
     try {
       try { new BroadcastChannel(`manifex-preview-${id}`).postMessage({ type: 'compiling' }); } catch {}
+      setProvisionStage('generate');
+      // Phase 2C split: /generate runs Claude to write code (cached on
+      // manifest_sha), /build runs pure bash setup.sh + run.sh. Click Build
+      // fires both; cache hits make the second+ clicks fast and deterministic.
+      const generateEvents = (event: string, data: any) => {
+        if (event === 'start') {
+          setBuildLog(prev => prev + `[generate] spec ${data?.spec_bytes ?? 0} bytes on ${data?.devbox_url ?? '?'}${data?.cache_hit ? ' (cache lookup)' : ''}\n`);
+        } else if (event === 'cache_hit') {
+          setBuildLog(prev => prev + `[generate] cache hit ${String(data?.commit_sha || '').slice(0, 12)} — skipping Claude\n`);
+          setProvisionStage('cache hit');
+        } else if (event === 'iteration') {
+          setProvisionStage(`gen turn ${data?.n ?? '?'}`);
+        } else if (event === 'tool_use') {
+          const input = data?.input || {};
+          let line = `→ ${data?.name}(`;
+          if (data?.name === 'bash') line += JSON.stringify(input.cmd || '').slice(0, 200);
+          else if (data?.name === 'write_file') line += `${input.path || '?'}, ${(input.content || '').length}b`;
+          else if (data?.name === 'read_file') line += String(input.path || '?');
+          else if (data?.name === 'list_files') line += String(input.path || '.');
+          else line += JSON.stringify(input).slice(0, 200);
+          line += ')\n';
+          setBuildLog(prev => prev + line);
+        } else if (event === 'tool_result') {
+          setBuildLog(prev => prev + `  ${data?.ok ? '✓' : '✗'} ${data?.summary || ''}\n`);
+        } else if (event === 'assistant_text') {
+          const text = (data?.text || '').slice(0, 2000);
+          setBuildLog(prev => prev + `\n[claude] ${text}\n\n`);
+        } else if (event === 'done') {
+          const sha = data?.commit_sha ? ` commit=${String(data.commit_sha).slice(0,12)}` : '';
+          setBuildLog(prev => prev + `\n[generate done]${sha} ${data?.iterations ?? '?'} turns in ${Math.round((data?.duration_ms ?? 0) / 1000)}s\n${data?.final_text || ''}\n`);
+        } else if (event === 'error') {
+          setBuildLog(prev => prev + `\n[generate error] ${data?.message || 'unknown'} (${data?.stage || ''})\n`);
+        }
+      };
+
+      const genResult = await streamBuild(`/api/manifex/sessions/${id}/generate`, generateEvents);
+      if (!genResult.ok) {
+        setPreviewError(`Generate failed: ${genResult.detail || 'unknown'}`);
+        return;
+      }
+
+      // ---- /build (pure bash) -----------------------------------------
       setProvisionStage('build');
-      const result = await streamBuild(
-        `/api/manifex/sessions/${id}/build`,
-        (event, data) => {
-          if (event === 'start') {
-            setBuildLog(prev => prev + `[build] spec ${data?.spec_bytes ?? 0} bytes on ${data?.devbox_url ?? '?'}\n`);
-          } else if (event === 'iteration') {
-            setProvisionStage(`turn ${data?.n ?? '?'}`);
-          } else if (event === 'tool_use') {
-            const input = data?.input || {};
-            let line = `→ ${data?.name}(`;
-            if (data?.name === 'bash') line += JSON.stringify(input.cmd || '').slice(0, 200);
-            else if (data?.name === 'write_file') line += `${input.path || '?'}, ${(input.content || '').length}b`;
-            else if (data?.name === 'read_file') line += String(input.path || '?');
-            else if (data?.name === 'list_files') line += String(input.path || '.');
-            else line += JSON.stringify(input).slice(0, 200);
-            line += ')\n';
-            setBuildLog(prev => prev + line);
-          } else if (event === 'tool_result') {
-            setBuildLog(prev => prev + `  ${data?.ok ? '✓' : '✗'} ${data?.summary || ''}\n`);
-          } else if (event === 'assistant_text') {
-            const text = (data?.text || '').slice(0, 2000);
-            setBuildLog(prev => prev + `\n[claude] ${text}\n\n`);
-          } else if (event === 'done') {
-            setBuildLog(prev => prev + `\n[done] ${data?.iterations ?? '?'} turns in ${Math.round((data?.duration_ms ?? 0) / 1000)}s\n${data?.final_text || ''}\n`);
-          } else if (event === 'error') {
-            setBuildLog(prev => prev + `\n[error] ${data?.message || 'unknown'} (${data?.stage || ''})\n`);
-          }
-        },
-      );
-      if (!result.ok) {
-        setPreviewError(`Build failed: ${result.detail || 'unknown'}`);
+      const buildEvents = (event: string, data: any) => {
+        if (event === 'start') {
+          setBuildLog(prev => prev + `\n[build] bash setup + run on ${data?.devbox_url || '?'}\n`);
+        } else if (event === 'setup_started') {
+          setProvisionStage('setup');
+          setBuildLog(prev => prev + `→ bash setup.sh\n`);
+        } else if (event === 'setup_stdout') {
+          const chunk = String(data?.chunk || '').trim();
+          if (chunk) setBuildLog(prev => prev + chunk + '\n');
+        } else if (event === 'setup_stderr') {
+          const chunk = String(data?.chunk || '').trim();
+          if (chunk) setBuildLog(prev => prev + chunk + '\n');
+        } else if (event === 'setup_exit') {
+          setBuildLog(prev => prev + `  setup exit=${data?.exit_code} (${data?.duration_ms}ms)\n`);
+        } else if (event === 'run_started') {
+          setProvisionStage('run');
+          setBuildLog(prev => prev + `→ bash run.sh [detached pid=${data?.pid ?? '?'}]\n`);
+        } else if (event === 'wait_port') {
+          setProvisionStage(`wait_port ${Math.round((data?.elapsed_ms ?? 0)/1000)}s`);
+        } else if (event === 'done') {
+          setBuildLog(prev => prev + `\n[build done] port=${data?.dev_port ?? '?'} wait=${Math.round((data?.wait_ms ?? 0)/1000)}s\n`);
+        } else if (event === 'error') {
+          setBuildLog(prev => prev + `\n[build error] ${data?.message || 'unknown'} (${data?.stage || ''})\n`);
+        }
+      };
+      const buildResult = await streamBuild(`/api/manifex/sessions/${id}/build`, buildEvents);
+      if (!buildResult.ok) {
+        setPreviewError(`Build failed: ${buildResult.detail || 'unknown'}`);
         return;
       }
 
