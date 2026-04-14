@@ -205,15 +205,38 @@ async function ensureWorkspaceVolume(appName: string): Promise<string> {
  * new machine's id.
  */
 async function createMachine(appName: string, volumeId: string): Promise<string> {
-  // Phase 2B pivot-back: devbox is dumb. No Claude, no API key. All
-  // LLM work runs on manifex-wip.
+  // Phase 4 parity: the devbox still runs no LLM itself, but inner
+  // Manifex (the user-built app running inside the devbox) expects
+  // the same env vars outer Manifex has so it can talk to real
+  // Supabase, the real Anthropic API, and the real Fly Machines
+  // API. We propagate them from manifex-wip's process.env at spawn
+  // time. All non-secret (URL) + secret (key) vars flow through the
+  // machine config env; Fly keeps them out of logs by default but
+  // they're not encrypted at rest on the machine — acceptable for
+  // v1 single-tenant ephemeral devboxes. Add proper secret plumbing
+  // in a later phase.
+  const parityEnv: Record<string, string> = { PORT: '8080' };
+  for (const key of [
+    'SUPABASE_PROJECT_URL',
+    'SUPABASE_SERVICE_KEY',
+    'ANTHROPIC_API_KEY',
+    'FLY_API_TOKEN',
+    'NEXT_PUBLIC_SUPABASE_URL',
+    'NEXT_PUBLIC_SUPABASE_ANON_KEY',
+  ]) {
+    const v = process.env[key];
+    if (v) parityEnv[key] = v;
+  }
+  if (!process.env.SUPABASE_PROJECT_URL) {
+    console.warn('[devbox] SUPABASE_PROJECT_URL missing from manifex-wip env — inner Manifex will not persist to real Supabase.');
+  }
   const body = {
     name: 'devbox',
     region: FLY_REGION,
     config: {
       image: DEVBOX_IMAGE,
       auto_destroy: false,
-      env: { PORT: '8080' },
+      env: parityEnv,
       mounts: [
         {
           volume: volumeId,
