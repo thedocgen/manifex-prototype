@@ -21,7 +21,7 @@ const FLY_REGION = 'iad';
 // recorded launch command and the user's iframe comes back in seconds
 // without a full Claude rebuild. Earlier tags stay in the registry
 // for progressive rollback.
-const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v3.2-bootstrap';
+const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v3.3-inline-output';
 const APP_PREFIX = 'manifex-app-';
 const MAX_ACTIVE_DEVBOXES = 3;
 

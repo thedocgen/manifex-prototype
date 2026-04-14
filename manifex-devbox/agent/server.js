@@ -264,6 +264,22 @@ async function handleLs(req, res) {
 }
 
 // ---- /__exec -------------------------------------------------------------
+//
+// Phase 2C fix: each exec captures stdout/stderr into a per-call buffer
+// and returns them INLINE in the response JSON. The ring buffer is still
+// fed (so /__logs SSE viewers see live progress) but the build route's
+// bash tool no longer has to tail it after the fact — which previously
+// leaked prior commands' output into the current command's tool_result
+// and made Claude think "bash output is corrupted with file listings".
+// Per-call buffers are bounded to keep response sizes sane.
+
+const EXEC_BUFFER_CAP = 128 * 1024; // 128 KB per call — plenty for sane shell
+
+function appendBounded(current, chunk) {
+  const next = current + chunk;
+  return next.length > EXEC_BUFFER_CAP ? next.slice(next.length - EXEC_BUFFER_CAP) : next;
+}
+
 async function handleExec(req, res) {
   let payload;
   try {
@@ -287,8 +303,19 @@ async function handleExec(req, res) {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
-  child.stdout.on('data', d => pushLog(d.toString('utf8')));
-  child.stderr.on('data', d => pushLog(d.toString('utf8')));
+  let stdoutBuf = '';
+  let stderrBuf = '';
+
+  child.stdout.on('data', d => {
+    const s = d.toString('utf8');
+    stdoutBuf = appendBounded(stdoutBuf, s);
+    pushLog(s);
+  });
+  child.stderr.on('data', d => {
+    const s = d.toString('utf8');
+    stderrBuf = appendBounded(stderrBuf, s);
+    pushLog(s);
+  });
 
   if (detach) {
     // Long-running command (e.g. `bash run.sh` for the dev server). Don't
@@ -310,7 +337,14 @@ async function handleExec(req, res) {
   const duration_ms = Date.now() - started;
   lastExit = { code: exit.code, signal: exit.signal, at: new Date().toISOString(), cmd };
   pushLog(`\n[exit ${exit.code}${exit.signal ? ' ' + exit.signal : ''} in ${duration_ms}ms]\n`);
-  return jsonResponse(res, 200, { ok: exit.code === 0, exit_code: exit.code, signal: exit.signal, duration_ms });
+  return jsonResponse(res, 200, {
+    ok: exit.code === 0,
+    exit_code: exit.code,
+    signal: exit.signal,
+    duration_ms,
+    stdout: stdoutBuf,
+    stderr: stderrBuf,
+  });
 }
 
 // ---- /__logs (SSE) -------------------------------------------------------

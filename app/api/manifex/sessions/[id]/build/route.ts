@@ -162,15 +162,22 @@ async function execTool(
         };
       }
       const exitCode = data?.exit_code ?? -1;
-      // Tail the log ring buffer to surface the actual stdout/stderr.
-      // /__exec's response only returns exit metadata; stdout is in the
-      // log stream. Grab a recent window.
-      const tail = await fetchLogTail(base, 4000);
+      const stdout = typeof data?.stdout === 'string' ? data.stdout : '';
+      const stderr = typeof data?.stderr === 'string' ? data.stderr : '';
       const ok = exitCode === 0;
+      // Compose a clear, per-command result so the model isn't left
+      // guessing which bytes belong to this call.
+      const parts = [
+        `exit_code: ${exitCode}`,
+        `duration_ms: ${data?.duration_ms ?? 0}`,
+      ];
+      if (stdout) parts.push(`--- stdout ---\n${stdout}`);
+      if (stderr) parts.push(`--- stderr ---\n${stderr}`);
+      if (!stdout && !stderr) parts.push('(no output)');
       return {
         ok,
         summary: `bash exit=${exitCode} (${data?.duration_ms ?? 0}ms)`,
-        content: `exit_code: ${exitCode}\nduration_ms: ${data?.duration_ms ?? 0}\n--- output tail ---\n${tail}`,
+        content: parts.join('\n'),
       };
     }
 
@@ -247,42 +254,6 @@ async function execTool(
     return { ok: false, summary: `unknown tool: ${name}`, content: `error: unknown tool ${name}` };
   } catch (e: any) {
     return { ok: false, summary: `${name}: ${e?.message || String(e)}`, content: `error: ${e?.message || String(e)}` };
-  }
-}
-
-// Pull the last N bytes of the devbox's log ring buffer via a quick SSE
-// connect-and-close. The agent pushes stdout/stderr there via pushLog,
-// and /__logs replays the current ring on connect.
-async function fetchLogTail(base: string, maxBytes: number): Promise<string> {
-  try {
-    const res = await fetch(`${base}/__logs`, {
-      method: 'GET',
-      signal: AbortSignal.timeout(2500),
-      headers: { accept: 'text/event-stream' },
-    });
-    if (!res.ok || !res.body) return '';
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
-    const deadline = Date.now() + 1500;
-    while (Date.now() < deadline && buf.length < maxBytes * 2) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-    }
-    try { reader.cancel(); } catch {}
-    // Extract the first data: JSON frame (the replay of the ring buffer).
-    const m = buf.match(/^data:\s*(.+)$/m);
-    if (!m) return '';
-    try {
-      const parsed = JSON.parse(m[1]);
-      const text = typeof parsed === 'string' ? parsed : JSON.stringify(parsed);
-      return text.length > maxBytes ? text.slice(text.length - maxBytes) : text;
-    } catch {
-      return m[1].slice(-maxBytes);
-    }
-  } catch {
-    return '';
   }
 }
 
