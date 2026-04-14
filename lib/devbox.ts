@@ -13,12 +13,15 @@
 const FLY_API_BASE = 'https://api.machines.dev/v1';
 const FLY_ORG = 'personal';
 const FLY_REGION = 'iad';
-// Phase 2B pivot-back: v3.1-lean is a dumb remote fs + shell. All
-// intelligence (the Claude agent loop) runs server-side on manifex-wip
-// and reaches in via /__write, /__read, /__ls, /__exec. The devbox
-// holds no API keys and runs no LLM. Earlier tags (v3-claude-agent,
-// v2.1-ubuntu, v2-ubuntu, :latest) remain in the registry for rollback.
-const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v3.1-lean';
+// Phase 2B pivot-back: v3.2-bootstrap is v3.1-lean plus a startup hook
+// that re-execs /app/workspace/.manifex/bootstrap.sh (if present) when
+// the agent boots. Fly's auto_stop_machines setting still takes the
+// machine down on idle, but because the Fly volume preserves the whole
+// workspace across stop/start, the agent restart runs the last
+// recorded launch command and the user's iframe comes back in seconds
+// without a full Claude rebuild. Earlier tags stay in the registry
+// for progressive rollback.
+const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v3.2-bootstrap';
 const APP_PREFIX = 'manifex-app-';
 const MAX_ACTIVE_DEVBOXES = 3;
 

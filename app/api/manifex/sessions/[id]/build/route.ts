@@ -307,7 +307,15 @@ Your workflow on each build:
 5. If /app/workspace already has a partial project, read the relevant files with read_file first and make the SMALLEST set of incremental edits needed to align with the spec. Do not rewrite what's already correct.
 6. Start the dev server in the background using bash with detach=true or nohup+disown. The dev server must bind to 0.0.0.0 (not localhost) on a port of your choosing. Write that port as a decimal integer to /app/workspace/.manifex-port — the devbox agent proxies / to whatever port lives in that file.
 7. Verify the dev server is listening before you finish (curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<port>/ should return a 2xx or 3xx).
-8. Finish with a one-sentence text response starting with "BUILD_SUMMARY:" describing what changed.
+8. Write /app/workspace/.manifex/bootstrap.sh containing the EXACT command line you used to start the dev server. When Fly stops the devbox for being idle and the user reopens the session, the agent re-execs this script on machine start so the dev server comes back without waiting for another full Claude rebuild. Example shape:
+     #!/bin/bash
+     set -e
+     cd /app/workspace
+     pkill -f "next dev" 2>/dev/null || true
+     nohup bash -c "npx next dev -H 0.0.0.0 -p 3000 > .manifex/dev.log 2>&1" < /dev/null > /dev/null 2>&1 &
+     disown
+   Make it executable-friendly (bash <path>, no shebang required) and idempotent (pkill the old process first so double-runs don't collide). This file is load-bearing for machine restarts — do not skip this step.
+9. Finish with a one-sentence text response starting with "BUILD_SUMMARY:" describing what changed.
 
 Stack decisions (when not explicitly overridden by the Environment page):
 - Default to Next.js 15 App Router + Tailwind v3 + SQLite + Drizzle ORM. It's what Manifex knows best and what the devbox toolchain is tuned for.

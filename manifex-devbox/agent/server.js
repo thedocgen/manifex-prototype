@@ -464,6 +464,50 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ---- Bootstrap hook (volume-backed dev-server restart) -----------------
+// Phase 2B pivot-back: Fly's auto_stop_machines setting stops idle
+// devboxes to save cost. The volume at /app/workspace keeps every file
+// the Claude agent wrote, but the next-dev / rails s / uvicorn / whatever
+// process dies with the machine. On machine start, we re-exec whatever
+// the last successful build recorded in /app/workspace/.manifex/bootstrap.sh
+// so the user's iframe comes back to life in seconds without needing
+// another full Claude rebuild.
+//
+// The build agent's system prompt instructs Claude to write this file
+// at the end of a successful build, containing the exact nohup command
+// it used to launch the dev server. We just bash it, detached, and
+// stream its stdout into the ring buffer so the editor log panel can
+// tail the restart.
+function runBootstrap() {
+  const bootstrap = path.join(WORKSPACE, '.manifex', 'bootstrap.sh');
+  if (!fs.existsSync(bootstrap)) {
+    console.log('[devbox-agent] no bootstrap.sh — waiting for first build');
+    return;
+  }
+  console.log('[devbox-agent] running .manifex/bootstrap.sh');
+  pushLog('\n[agent] machine started — running .manifex/bootstrap.sh\n');
+  try {
+    const child = spawn('bash', [bootstrap], {
+      cwd: WORKSPACE,
+      env: { ...process.env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
+    });
+    child.stdout.on('data', d => pushLog(d.toString('utf8')));
+    child.stderr.on('data', d => pushLog(d.toString('utf8')));
+    child.on('exit', (code, signal) => {
+      pushLog(`\n[agent] bootstrap.sh exit ${code}${signal ? ' ' + signal : ''}\n`);
+    });
+    child.unref();
+  } catch (e) {
+    pushLog(`[agent] bootstrap failed: ${e && e.message}\n`);
+  }
+}
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[devbox-agent] listening on :${PORT}, workspace ${WORKSPACE}`);
+  // Fire-and-forget on startup. Bootstrap should be a background launcher,
+  // not a blocking script — if Claude wrote something that blocks, the
+  // agent stays up anyway because this is detached.
+  setTimeout(runBootstrap, 200);
 });
