@@ -148,6 +148,35 @@ Include in the Stack section:
 - **Dev command**: the literal shell invocation. Examples: "next dev -H 0.0.0.0 -p 3000", "bundle exec rails server -b 0.0.0.0 -p 3000", "ember serve --host 0.0.0.0 --port 3000", "cargo run", "mix phx.server".
 - **Setup steps (plain-language ordered list)**: what setup.sh has to do to get from a blank box to "dev server ready to start". Apt installs, package manager install, schema push, seed, etc.
 
+─── Section 3 (OPTIONAL, but required when the app needs any external service): "Services" ───
+
+If the app needs to talk to any external service (Supabase, Stripe, OpenAI, a real Postgres, an existing API, anything with credentials), declare it in a "### Services" subsection of the Environment page. The outer Manifex build pipeline PARSES this section verbatim at devbox-spawn time and propagates matching env vars from outer's own environment into the devbox machine env, so the app can reach its services without any hardcoded secret lists.
+
+Format each service as a markdown bullet followed by a "Secrets:" sub-list. The parser looks for all-caps identifiers (A-Z, 0-9, underscores; at least 3 chars) as secret names. Example:
+
+  ### Services
+
+  - **Supabase Postgres** — Canonical store for projects, sessions, manifest_state, generate_cache, conversation. Same Postgres instance across stop/start.
+    Secrets:
+    - SUPABASE_PROJECT_URL — base URL of the Supabase project (e.g. https://abc.supabase.co)
+    - SUPABASE_SERVICE_KEY — service role key used server-side
+    Schema: db/schema.sql (setup.sh runs \`psql "$SUPABASE_PROJECT_URL" -f db/schema.sql\` on first boot, idempotent via CREATE TABLE IF NOT EXISTS)
+
+  - **Anthropic API** — Claude model calls for /prompt and /generate.
+    Secrets:
+    - ANTHROPIC_API_KEY — Anthropic API key
+
+  - **Fly Machines API** — Spawn per-session devboxes for this app's users.
+    Secrets:
+    - FLY_API_TOKEN — Fly personal access token with org-scoped deploy + machines write
+
+Rules:
+- Declare EVERY external dependency the app actually uses. Missing declarations = missing env vars = runtime failures.
+- Name secrets with ALL_CAPS identifiers matching exactly the env var names the code expects — the parser uses these as env var names verbatim.
+- The outer pipeline does NOT create, rotate, or manage the secret values themselves; it only propagates them from outer's own process.env. If a declared secret isn't set on outer, the devbox will spawn without it and the inner build will fail with a clear undefined-env error.
+- If the app has NO external services (pure static site, in-memory-only demo), omit this section entirely — the parser treats absence as "no external deps" and doesn't propagate anything.
+- This vocabulary is recursive: every level of Manifex (outer, inner, inner-inner) runs the same parser on its own Environment page. An inner app that declares its own Services gets the same secret plumbing as outer would, with no privileged shortcut.
+
 ─── SHALLOW PASS ───
 
 Emit the Environment page fully populated with BOTH sections above — the Compute space starter text verbatim and a Stack section showing your pick, rationale, and the full bullet list. This is the one page that is NEVER stub-only in the shallow pass. Every other page can be a 2-4 sentence summary; Environment must be complete so the generate agent has a working contract from the first build.

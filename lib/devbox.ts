@@ -204,7 +204,7 @@ async function ensureWorkspaceVolume(appName: string): Promise<string> {
  * volume so node_modules + apt state survive stop/start. Returns the
  * new machine's id.
  */
-async function createMachine(appName: string, volumeId: string): Promise<string> {
+async function createMachine(appName: string, volumeId: string, environmentContent?: string): Promise<string> {
   // Phase 4 parity: the devbox still runs no LLM itself, but inner
   // Manifex (the user-built app running inside the devbox) expects
   // the same env vars outer Manifex has so it can talk to real
@@ -216,19 +216,30 @@ async function createMachine(appName: string, volumeId: string): Promise<string>
   // v1 single-tenant ephemeral devboxes. Add proper secret plumbing
   // in a later phase.
   const parityEnv: Record<string, string> = { PORT: '8080' };
-  for (const key of [
-    'SUPABASE_PROJECT_URL',
-    'SUPABASE_SERVICE_KEY',
-    'ANTHROPIC_API_KEY',
-    'FLY_API_TOKEN',
-    'NEXT_PUBLIC_SUPABASE_URL',
-    'NEXT_PUBLIC_SUPABASE_ANON_KEY',
-  ]) {
-    const v = process.env[key];
-    if (v) parityEnv[key] = v;
-  }
-  if (!process.env.SUPABASE_PROJECT_URL) {
-    console.warn('[devbox] SUPABASE_PROJECT_URL missing from manifex-wip env — inner Manifex will not persist to real Supabase.');
+  // Phase 4 parity, doc-driven: the env vars propagated come from the
+  // Environment page's Services section (see lib/manifest-services.ts).
+  // Recursive rule — no hardcoded secret list means any third-level
+  // devbox spawned from inside inner Manifex runs the same parser on
+  // its own Environment page and gets the same secret plumbing, no
+  // privileged outer shortcut. Missing secrets are logged; the inner
+  // build will fail with a clear undefined-env error if a declared
+  // secret isn't set on outer.
+  try {
+    const { parseEnvironmentServices, buildDevboxEnvFromServices } = await import('./manifest-services');
+    const parsed = parseEnvironmentServices(environmentContent || '');
+    const { env: declaredEnv, missing } = buildDevboxEnvFromServices(parsed, process.env);
+    Object.assign(parityEnv, declaredEnv);
+    if (parsed.services.length > 0) {
+      console.log(`[devbox] doc-declared services (${parsed.services.length}): ${parsed.services.map(s => s.name).join(' | ')}`);
+      console.log(`[devbox] propagating ${Object.keys(declaredEnv).length} declared secrets: ${Object.keys(declaredEnv).join(', ') || '(none present in outer env)'}`);
+    } else {
+      console.warn('[devbox] session Environment page declares no Services — inner build will run without any external credentials');
+    }
+    if (missing.length > 0) {
+      console.warn(`[devbox] declared secrets NOT set on manifex-wip env (inner build will likely fail): ${missing.join(', ')}`);
+    }
+  } catch (e: any) {
+    console.warn('[devbox] doc-driven env parse failed:', e?.message || e);
   }
   const body = {
     name: 'devbox',
@@ -306,7 +317,10 @@ export interface CreateDevboxError {
  * returns the existing app's URL and the first running machine. Enforces
  * a hard cap of MAX_ACTIVE_DEVBOXES.
  */
-export async function createDevbox(sessionId: string): Promise<CreateDevboxResult | CreateDevboxError> {
+export async function createDevbox(
+  sessionId: string,
+  opts: { environmentContent?: string } = {},
+): Promise<CreateDevboxResult | CreateDevboxError> {
   const appName = appNameFor(sessionId);
 
   // If the app already exists for this session, just return its state.
@@ -339,7 +353,7 @@ export async function createDevbox(sessionId: string): Promise<CreateDevboxResul
     await ensureApp(appName);
     await ensurePublicIp(appName);
     const volumeId = await ensureWorkspaceVolume(appName);
-    const machineId = await createMachine(appName, volumeId);
+    const machineId = await createMachine(appName, volumeId, opts.environmentContent);
     return {
       ok: true,
       state: {

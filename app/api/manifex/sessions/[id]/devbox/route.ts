@@ -49,7 +49,11 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     existing = null;
   }
 
-  const result = await createDevbox(id);
+  // Phase 4: pass the session's Environment page content so the
+  // doc-driven services parser can extract declared secrets and
+  // propagate matching outer env vars to the devbox at spawn time.
+  const environmentContent = (session.manifest_state?.pages as any)?.environment?.content;
+  const result = await createDevbox(id, { environmentContent });
   if (!result.ok) {
     const status = result.reason === 'cap_exceeded' ? 503 : 500;
     return NextResponse.json({ error: result.message, reason: result.reason }, { status });
