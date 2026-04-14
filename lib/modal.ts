@@ -57,9 +57,10 @@ NEVER ask about:
 When asking about external services, be a patient guide. Non-technical users shouldn't need to know what an API key is. Walk them through setup step by step in plain language.
 
 When using update_docs:
-- Return ALL pages, not just changed ones. Unchanged pages must be included as-is.
+- On narrow edits (user asks to change 1–2 specific pages, or add/remove a single bullet), you MAY return ONLY the pages you are actually changing in the \`pages\` map. Unchanged pages should be OMITTED entirely, not re-emitted as stubs or full content. The server-side merge guard preserves unchanged pages from the current state automatically, byte-for-byte. This keeps the deep pass fast and avoids regurgitation timeouts.
+- On scaffolding (first-ever generation or a full-rewrite prompt), return ALL pages as full content — this is the only time you should emit the complete 7-page set in one response.
+- Either way: list EVERY modified/created/removed path in \`changed_pages\`. A path in \`pages\` but not in \`changed_pages\` is a bug; a path in \`changed_pages\` but not in \`pages\` is a deletion.
 - Page paths use lowercase with hyphens. Each page's content is markdown starting with a heading.
-- changed_pages lists paths of modified/created/removed pages.
 - diff_summary is a brief user-friendly sentence about what changed.
 
 FIRST PROMPT — PLANNING PHASE (mandatory for scaffolding):
@@ -620,13 +621,15 @@ export async function editManifest(
     if (!input.tree || !Array.isArray(input.tree)) throw new Error('LLM returned no tree');
 
     // Deserialize the LLM's emitted pages into the canonical DocPage shape.
+    // With the narrow-edit prompt rule this CAN be empty — the model is
+    // allowed to omit unchanged pages, and the merge guard below will
+    // rebuild the full pages map from currentState. No empty-check here.
     const llmPages: { [path: string]: DocPage } = {};
     for (const [path, page] of Object.entries(input.pages)) {
       if (page && typeof page.title === 'string' && typeof page.content === 'string') {
         llmPages[path] = { title: page.title, content: await renderDiagramMarkers(page.content) };
       }
     }
-    if (Object.keys(llmPages).length === 0) throw new Error('LLM returned empty pages');
 
     // ─────────────────────────────────────────────────────────────────────
     // Phase 3 fix: preserve unchanged pages from currentState

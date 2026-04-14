@@ -173,7 +173,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           // this race, an unresolved deep call leaves pending_attempt.
           // draft=true forever and the user is stuck with a non-clickable
           // 'Refining content…' pill.
-          const DEEP_TIMEOUT_MS = 6 * 60 * 1000; // 6 minutes
+          const DEEP_TIMEOUT_MS = 12 * 60 * 1000; // 12 minutes — safety net; the prompt-level narrow-edit allowance should make most deep passes return in 30-90s.
           log(`deep start hasShallowDraft=${!!shallowDraft}`);
           const deepStarted = Date.now();
           let deep;
