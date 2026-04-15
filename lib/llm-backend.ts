@@ -754,19 +754,94 @@ Do NOT modify any files. Your working directory already contains the correct cod
 BUILD_SUMMARY: no-op, spec page content unchanged.`;
       systemPromptVariant = SYSTEM_PROMPT_MANIDEX_INCREMENTAL;
     } else {
-      // Build a short, change-focused diff block. Truncate individual
-      // before/after payloads at 4KB so a large rewrite doesn't blow
-      // up the user message, but keep the first page or two in full
-      // for context.
-      const MAX_PAGE_PAYLOAD = 4000;
-      const truncate = (s: string) => (s.length > MAX_PAGE_PAYLOAD ? s.slice(0, MAX_PAGE_PAYLOAD) + `\n\n[… truncated ${s.length - MAX_PAGE_PAYLOAD} more characters]` : s);
+      // Build a change-focused diff block. For each changed page, if
+      // both full BEFORE and AFTER fit in the soft budget, send them
+      // in full. Otherwise, extract the divergent hunk (first line
+      // that differs through last line that differs, plus ±CONTEXT
+      // lines on each side) and send that. This is the fix for the
+      // "4KB head truncation" bug surfaced by governor: appending to
+      // the end of a long page produced identical head-slice windows
+      // in BEFORE and AFTER, and the agent correctly refused to
+      // hallucinate a change it couldn't see.
+      const PER_PAGE_FULL_BUDGET = 12_000;  // if both sides total < this, send full
+      const CONTEXT_LINES = 6;
+      const HUNK_HARD_CAP = 32_000;         // per-side cap on hunk output, very generous
+
+      const buildPageDiffBlock = (page: ChangedPage): string => {
+        const { before, after, kind } = page;
+        // Added/removed pages: show the full surviving side. For
+        // added, BEFORE is a placeholder anyway; for removed, AFTER is.
+        if (kind === 'added' || kind === 'removed') {
+          return `BEFORE:\n${before.slice(0, HUNK_HARD_CAP)}${before.length > HUNK_HARD_CAP ? '\n[… truncated]' : ''}\n\nAFTER:\n${after.slice(0, HUNK_HARD_CAP)}${after.length > HUNK_HARD_CAP ? '\n[… truncated]' : ''}`;
+        }
+        // Short enough: send both in full.
+        if (before.length + after.length <= PER_PAGE_FULL_BUDGET) {
+          return `BEFORE:\n${before}\n\nAFTER:\n${after}`;
+        }
+        // Hunk extraction: find first line that differs by walking
+        // forward, last line that differs by walking backward from
+        // both ends. This handles appends (first_diff == bLines.len),
+        // prepends (last_diff == first_diff -ish), mid-page edits,
+        // and large-region rewrites. CONTEXT lines on each side give
+        // the agent enough surroundings to locate the change in the
+        // full spec without restating the whole page.
+        const bLines = before.split('\n');
+        const aLines = after.split('\n');
+        let firstDiff = 0;
+        while (
+          firstDiff < bLines.length &&
+          firstDiff < aLines.length &&
+          bLines[firstDiff] === aLines[firstDiff]
+        ) {
+          firstDiff++;
+        }
+        let bEnd = bLines.length - 1;
+        let aEnd = aLines.length - 1;
+        while (
+          bEnd >= firstDiff &&
+          aEnd >= firstDiff &&
+          bLines[bEnd] === aLines[aEnd]
+        ) {
+          bEnd--;
+          aEnd--;
+        }
+        // bEnd/aEnd now point at the LAST divergent line on each side
+        // (or firstDiff - 1 if the other side ran out).
+        const bWindowStart = Math.max(0, firstDiff - CONTEXT_LINES);
+        const bWindowEnd = Math.min(bLines.length, bEnd + 1 + CONTEXT_LINES);
+        const aWindowStart = Math.max(0, firstDiff - CONTEXT_LINES);
+        const aWindowEnd = Math.min(aLines.length, aEnd + 1 + CONTEXT_LINES);
+
+        const bHunkLines = bLines.slice(bWindowStart, bWindowEnd);
+        const aHunkLines = aLines.slice(aWindowStart, aWindowEnd);
+        let bHunk = bHunkLines.join('\n');
+        let aHunk = aHunkLines.join('\n');
+        // Per-side hard cap. Very generous (32KB); only fires on
+        // pathological whole-page rewrites. Truncates from the END
+        // of the hunk because the divergence is at the start of the
+        // hunk by construction.
+        if (bHunk.length > HUNK_HARD_CAP) {
+          bHunk = bHunk.slice(0, HUNK_HARD_CAP) + '\n[… hunk truncated]';
+        }
+        if (aHunk.length > HUNK_HARD_CAP) {
+          aHunk = aHunk.slice(0, HUNK_HARD_CAP) + '\n[… hunk truncated]';
+        }
+
+        const bPrefix = bWindowStart > 0 ? `[… ${bWindowStart} unchanged lines above]\n` : '';
+        const bSuffix = bWindowEnd < bLines.length ? `\n[… ${bLines.length - bWindowEnd} unchanged lines below]` : '';
+        const aPrefix = aWindowStart > 0 ? `[… ${aWindowStart} unchanged lines above]\n` : '';
+        const aSuffix = aWindowEnd < aLines.length ? `\n[… ${aLines.length - aWindowEnd} unchanged lines below]` : '';
+
+        return `BEFORE (divergent region, ±${CONTEXT_LINES} lines context, lines ${bWindowStart + 1}-${bWindowEnd} of ${bLines.length}):
+${bPrefix}${bHunk}${bSuffix}
+
+AFTER (divergent region, ±${CONTEXT_LINES} lines context, lines ${aWindowStart + 1}-${aWindowEnd} of ${aLines.length}):
+${aPrefix}${aHunk}${aSuffix}`;
+      };
+
       const diffBlocks = diff.map((p) => `## ${p.path} — ${p.title} (${p.kind})
 
-BEFORE:
-${truncate(p.before)}
-
-AFTER:
-${truncate(p.after)}`).join('\n\n---\n\n');
+${buildPageDiffBlock(p)}`).join('\n\n---\n\n');
 
       userPrompt = `The Manifex codebase in your working directory is already scaffolded. The user just made a narrow edit to the spec. Apply the corresponding code change as a surgical edit — minimal, scoped, reviewable. Think git commit.
 
