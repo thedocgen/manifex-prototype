@@ -586,10 +586,27 @@ Be efficient. Your output is the filesystem state when BUILD_SUMMARY fires. Ever
 const MANIDEX_META_KEY_PREFIX = '__manidex_';
 const MANIDEX_STATE_SNAPSHOT_KEY = '__manidex_state_snapshot__';
 
-// Directories / files to skip when serializing the temp dir into
-// manifex_compilations.codex_files. We ship source only — not install
-// artifacts, not build output, not editor metadata.
-const CODEX_SKIP_DIRS = new Set([
+// Directories to skip when serializing the temp dir into
+// manifex_compilations.codex_files. Split into two tiers:
+//
+// ALWAYS: dotfile-prefixed tool metadata and node_modules — these are
+// universally NEVER source under any legitimate project layout. Safe
+// to skip at every depth. Nested occurrences (e.g. workspace nested
+// .git, bundled node_modules) are still correctly excluded.
+//
+// ROOT_ONLY: build output directory names that HAPPEN to collide with
+// legitimate source path segments. 'build' is the poster child — it
+// shows up as a top-level Next.js-or-similar output dir, but also as
+// a Next.js dynamic API route segment like app/api/foo/build/route.ts.
+// 'dist' and 'out' have the same problem. These are skipped ONLY when
+// they appear as direct children of the root (relDir === '').
+//
+// Bug history: the P1 REQUIRED ROUTES drive surfaced the 'build' at
+// depth collision — app/api/manifex/sessions/[id]/build/route.ts
+// vanished from the compilation because the walker treated the
+// enclosing `build/` directory as skipped build output. Split fixes
+// that class of bug without regressing the root-level skip behavior.
+const CODEX_ALWAYS_SKIP_DIRS = new Set([
   'node_modules',
   '.next',
   '.git',
@@ -597,6 +614,8 @@ const CODEX_SKIP_DIRS = new Set([
   '.turbo',
   '.vercel',
   '.manifex',
+]);
+const CODEX_ROOT_ONLY_SKIP_DIRS = new Set([
   'dist',
   'build',
   'out',
@@ -622,9 +641,17 @@ async function walkAndSerialize(
 
   async function walk(absDir: string, relDir: string): Promise<void> {
     const entries = await fs.readdir(absDir, { withFileTypes: true });
+    const atRoot = relDir === '';
     for (const entry of entries) {
       if (entry.isDirectory()) {
-        if (CODEX_SKIP_DIRS.has(entry.name)) continue;
+        // Always-skip: applies at every depth. Dotfile tool dirs +
+        // node_modules.
+        if (CODEX_ALWAYS_SKIP_DIRS.has(entry.name)) continue;
+        // Root-only skip: build/dist/out at the top level of the
+        // generated project are install/output dirs. At any non-root
+        // depth they're legitimate source path segments (e.g. Next.js
+        // API route app/api/foo/build/route.ts) and must be walked.
+        if (atRoot && CODEX_ROOT_ONLY_SKIP_DIRS.has(entry.name)) continue;
         await walk(path.join(absDir, entry.name), relDir ? `${relDir}/${entry.name}` : entry.name);
         continue;
       }
