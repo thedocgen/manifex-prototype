@@ -292,3 +292,125 @@ export function resolveDevboxSecrets(
   }
   return { env: envMap, missing };
 }
+
+// ───────────────────────────────────────────────────────────────────
+// REQUIRED ROUTES — doc primitive for files the build agent MUST create.
+//
+// The Manifex spec's "Pages and Layout" page (and any other page that
+// declares server-side routes) can include a "### REQUIRED ROUTES"
+// subsection listing files the generated app must have. Each bullet
+// has the shape:
+//
+//   ### REQUIRED ROUTES
+//
+//   - app/api/manifex/sessions/[id]/build/route.ts — runs setup.sh + run.sh via devbox /__exec, streams SSE events
+//   - app/api/manifex/sessions/[id]/devbox/health/route.ts — probes Fly machine state, returns { ready, last_check, machine_id }
+//
+// Motivation: earlier spec pages used a "Files" subsection with similar
+// bullets, but the build agent read them as DOCUMENTATION of existing
+// files ("here's what the codebase already has") instead of INSTRUCTIONS
+// to create them. Net result: missing route files silently stayed
+// missing across incremental edits. REQUIRED ROUTES is the prescriptive
+// primitive — the system prompt teaches the agent that a REQUIRED ROUTES
+// entry for a path that doesn't exist in cwd is a MUST-CREATE, not a
+// "file is already here."
+//
+// Distinction from REQUIRED SHAPE: REQUIRED SHAPE pins the exact BYTES
+// of a file (used for postcss.config.mjs, instrumentation.ts where a
+// runtime constraint is non-obvious). REQUIRED ROUTES pins the EXISTENCE
+// and SEMANTICS (via prose description) of a route file, leaving the
+// implementation to the agent's judgment. Both compose: a file can be
+// listed as REQUIRED ROUTES AND have a REQUIRED SHAPE fence elsewhere,
+// in which case the fence wins.
+//
+// Recursive rule: every level of Manifex/Manidex uses the same
+// REQUIRED ROUTES vocabulary.
+
+export interface RequiredRouteDecl {
+  /** File path relative to the project root (e.g. "app/api/foo/route.ts") */
+  path: string;
+  /** Prose description of the route's behavior, from the bullet line. */
+  description: string;
+}
+
+export interface ParsedRequiredRoutes {
+  routes: RequiredRouteDecl[];
+}
+
+// Bullet matcher: "- <path> — <description>". Accepts em-dash (U+2014),
+// en-dash (U+2013), plain hyphen, or colon as the separator. The path
+// must end with a recognized source extension so prose bullets that
+// happen to start with a path-like token don't get swept in.
+const REQUIRED_ROUTE_BULLET_RE = /^\s*-\s+(`?)([A-Za-z0-9_\-./[\]]+\.(?:ts|tsx|js|jsx|mjs|cjs|py|sh|sql|css|html|json|md))\1\s*[\u2014\u2013\-:]\s*(.+)$/;
+
+// Heading matcher: any H1-H6 whose text CONTAINS "REQUIRED ROUTES"
+// (case-insensitive). Keeps the primitive flexible — "### REQUIRED
+// ROUTES", "## Required routes (new in v2)", "#### REQUIRED ROUTES
+// — build + health" all match.
+const REQUIRED_ROUTES_HEADING_RE = /^#{1,6}\s+.*REQUIRED\s+ROUTES/i;
+
+/**
+ * Parse REQUIRED ROUTES subsections out of a markdown page. Returns
+ * every file-path bullet found under a "REQUIRED ROUTES" heading.
+ * Stops collecting at the next heading (of any level) or EOF.
+ *
+ * Permissive: if the page has no REQUIRED ROUTES section, returns an
+ * empty list instead of throwing.
+ */
+export function parseRequiredRoutes(markdown: string): ParsedRequiredRoutes {
+  const routes: RequiredRouteDecl[] = [];
+  if (!markdown || typeof markdown !== 'string') return { routes };
+
+  const lines = markdown.split('\n');
+  let inBlock = false;
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+
+    if (REQUIRED_ROUTES_HEADING_RE.test(line)) {
+      inBlock = true;
+      continue;
+    }
+    // Any subsequent heading closes the block.
+    if (inBlock && /^#{1,6}\s/.test(line)) {
+      inBlock = false;
+      continue;
+    }
+    if (!inBlock) continue;
+
+    const m = line.match(REQUIRED_ROUTE_BULLET_RE);
+    if (!m) continue;
+    const path = m[2].trim();
+    const description = m[3].trim();
+    // De-dupe on path — if the same path appears twice, keep the first.
+    if (routes.some((r) => r.path === path)) continue;
+    routes.push({ path, description });
+  }
+
+  return { routes };
+}
+
+/**
+ * Walk a map of { pagePath: markdown } and collect REQUIRED ROUTES
+ * declarations across all pages. Preserves the order pages are walked
+ * so callers can bias toward the primary declaring page if the same
+ * route is mentioned on multiple pages (though de-duplication already
+ * keeps the first occurrence).
+ */
+export function parseRequiredRoutesFromPages(
+  pages: Record<string, { content?: string } | string | undefined>,
+): ParsedRequiredRoutes {
+  const all: RequiredRouteDecl[] = [];
+  const seen = new Set<string>();
+  for (const [, page] of Object.entries(pages || {})) {
+    const content = typeof page === 'string' ? page : page?.content;
+    if (!content) continue;
+    const parsed = parseRequiredRoutes(content);
+    for (const r of parsed.routes) {
+      if (seen.has(r.path)) continue;
+      seen.add(r.path);
+      all.push(r);
+    }
+  }
+  return { routes: all };
+}

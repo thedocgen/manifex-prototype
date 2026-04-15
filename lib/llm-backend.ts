@@ -515,6 +515,21 @@ Rules:
 
 Recursive rule: every level of Manifex/Manidex uses the same REQUIRED SHAPE vocabulary on its own spec pages. An inner spec's REQUIRED SHAPE block gets the exact same verbatim treatment.
 
+── REQUIRED ROUTES subsection ──
+
+When a spec page contains a subsection heading that includes "REQUIRED ROUTES" (e.g. "### REQUIRED ROUTES"), every bullet line under it is a file the agent MUST ensure exists in the working directory. Format:
+
+  ### REQUIRED ROUTES
+
+  - app/api/manifex/sessions/[id]/build/route.ts — runs setup.sh + run.sh via devbox /__exec, streams SSE events
+  - app/api/manifex/sessions/[id]/devbox/health/route.ts — probes Fly machine state, returns { ready, last_check, machine_id }
+
+Rules:
+1. These are INSTRUCTIONS, not documentation of existing files. If a listed path does not exist in the cwd, CREATE it with Write. If it exists, verify it matches the prose description and Edit it if not.
+2. Match the route's behavior to the prose description after the em-dash / hyphen. Use the existing project's conventions for similar routes (imports, error handling, SSE streaming patterns, response shapes).
+3. REQUIRED ROUTES composes with REQUIRED SHAPE. If the same path has a REQUIRED SHAPE fenced block elsewhere in the spec, REQUIRED SHAPE wins (copy the fence verbatim). If only REQUIRED ROUTES, implement the described behavior using your judgment.
+4. The distinction between "Files" subsections and "REQUIRED ROUTES" is prescriptive vs descriptive: "Files" describes what exists; "REQUIRED ROUTES" tells you what must exist. A missing REQUIRED ROUTES path is a bug you must fix.
+
 Be efficient. Batch Write calls. Do not re-read files you just wrote. Do not ls the same directory twice in a row. Do not escape the cwd. The directory is ephemeral — whatever you leave on disk when BUILD_SUMMARY fires is what gets persisted into manifex_compilations.`;
 
 // Incremental system prompt — used when a previous compilation has
@@ -546,6 +561,16 @@ Narrowness is the point. A single-sentence doc edit should produce a single-file
 ── REQUIRED SHAPE code blocks ──
 
 If a changed spec page contains a fenced code block whose header contains "REQUIRED SHAPE" (e.g. \`\`\`ts path=lib/example.ts REQUIRED SHAPE), you MUST write that file to the indicated path BYTE-FOR-BYTE from the fence. REQUIRED SHAPE is a hard contract even in incremental mode. Overwrite the existing file with the exact fence content; do not merge or preserve prior edits.
+
+── REQUIRED ROUTES subsection ──
+
+If a changed spec page contains a subsection heading that includes "REQUIRED ROUTES", every bullet under it is a route file that MUST exist in the working directory. If the listed path doesn't exist yet, CREATE it with Write — the bullet's prose description after the em-dash is your behavioral spec. If the path exists, verify it matches the description and Edit it if not.
+
+CRITICAL: these are INSTRUCTIONS, not documentation. A missing REQUIRED ROUTES path is a bug in the current compilation that the agent must fix, not a note that the file is somewhere else. Don't skip it because "the spec is describing what's there" — the spec is describing what MUST be there. If you don't see the file on disk, create it.
+
+In incremental mode, REQUIRED ROUTES in a CHANGED page applies — create/update routes mentioned on the pages that changed. Routes listed in unchanged pages are assumed already correct on disk; don't re-verify them unless you're already editing that area for another reason.
+
+REQUIRED ROUTES composes with REQUIRED SHAPE: if a route file is ALSO pinned with a REQUIRED SHAPE fenced block, the fence content wins (copy verbatim). If only a REQUIRED ROUTES bullet, implement the described behavior using project conventions.
 
 ── Files you MUST NOT touch ──
 
@@ -735,6 +760,37 @@ async function runWithClaudeAgentSDK(
   let systemPromptVariant: string;
   let changedPagesForEmit: ChangedPage[] = [];
 
+  // REQUIRED ROUTES extraction. In incremental mode, parse only the
+  // CHANGED pages (routes on unchanged pages are assumed already on
+  // disk). In cold mode, parse ALL current pages (everything needs to
+  // be scaffolded). The parsed list is surfaced in the user message as
+  // an explicit must-create-or-verify checklist so the agent can't
+  // read "Files" bullets as descriptive-only.
+  const { parseRequiredRoutesFromPages } = await import('./manifest-services');
+  let requiredRoutes: Array<{ path: string; description: string }> = [];
+  if (incremental && opts.currentPages) {
+    // Build a pages-subset containing only the changed page paths so
+    // the parser only sees the diff scope.
+    const changedPaths = new Set(computePageDiff(opts.previousPages!, opts.currentPages).map((p) => p.path));
+    const changedPagesSubset: Record<string, { content: string }> = {};
+    for (const p of changedPaths) {
+      const page = opts.currentPages[p];
+      if (page?.content) changedPagesSubset[p] = { content: page.content };
+    }
+    requiredRoutes = parseRequiredRoutesFromPages(changedPagesSubset).routes;
+  } else if (opts.currentPages) {
+    requiredRoutes = parseRequiredRoutesFromPages(
+      opts.currentPages as Record<string, { content: string }>,
+    ).routes;
+  }
+  if (requiredRoutes.length > 0) {
+    console.log(`[manidex] REQUIRED ROUTES extracted from spec: ${requiredRoutes.length} — ${requiredRoutes.map((r) => r.path).join(', ')}`);
+    emit('required_routes', { count: requiredRoutes.length, paths: requiredRoutes.map((r) => r.path) });
+  }
+  const requiredRoutesBlock = requiredRoutes.length > 0
+    ? `\n\n── REQUIRED ROUTES (${requiredRoutes.length}) ──\n\nThe spec declares the following route files MUST exist. For each one, check whether it's already on disk (Glob/Read). If absent, CREATE it with Write. If present, verify it matches the description and Edit it if not. These are INSTRUCTIONS, not documentation of existing files.\n\n${requiredRoutes.map((r) => `- ${r.path} — ${r.description}`).join('\n')}\n`
+    : '';
+
   if (incremental) {
     const diff = computePageDiff(opts.previousPages!, opts.currentPages!);
     changedPagesForEmit = diff;
@@ -848,13 +904,14 @@ ${buildPageDiffBlock(p)}`).join('\n\n---\n\n');
 Changed spec pages (${diff.length}):
 
 ${diffBlocks}
-
+${requiredRoutesBlock}
 Your job:
 1. Identify which source files correspond to the changed page${diff.length === 1 ? '' : 's'}. Use Glob/Grep to find them by content; don't guess.
 2. Read the files. Understand their current state.
 3. Apply the minimal edit that brings the code in line with the new doc content. Prefer Edit over Write.
-4. Leave every unrelated file byte-for-byte identical. Do not "also refactor while you're here".
-5. Finish with "BUILD_SUMMARY: <one sentence>".
+4. For any REQUIRED ROUTES path above: Glob/Read to check if it exists. If absent, CREATE it with Write using the bullet's prose description as the spec. If present, verify it matches and Edit if not. Missing REQUIRED ROUTES are bugs to fix, not notes to ignore.
+5. Leave every unrelated file byte-for-byte identical. Do not "also refactor while you're here".
+6. Finish with "BUILD_SUMMARY: <one sentence>".
 
 manifest_sha: ${manifestSha.slice(0, 12)}`;
       systemPromptVariant = SYSTEM_PROMPT_MANIDEX_INCREMENTAL;
@@ -864,7 +921,7 @@ manifest_sha: ${manifestSha.slice(0, 12)}`;
     userPrompt = `A Manifex documentation spec is below. Your working directory is ${cwd}. Your goal: bring the code in that directory into alignment with the spec. The directory is empty — scaffold the project from scratch.
 
 Write setup.sh (idempotent installer) and run.sh (starts the dev server in the background and returns immediately). Do NOT run setup.sh, do NOT run run.sh, do NOT npm install, do NOT start the dev server yourself. A downstream Manidex runner picks those up after you finish. Finish with a one-sentence BUILD_SUMMARY.
-
+${requiredRoutesBlock}
 manifest_sha: ${manifestSha}
 
 === SPEC BEGIN ===
