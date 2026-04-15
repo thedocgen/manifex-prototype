@@ -158,9 +158,10 @@ Format each service as a markdown bullet followed by a "Secrets:" sub-list. The 
 
   - **Supabase Postgres** — Canonical store for projects, sessions, manifest_state, generate_cache, conversation. Same Postgres instance across stop/start.
     Secrets:
-    - SUPABASE_PROJECT_URL — base URL of the Supabase project (e.g. https://abc.supabase.co)
-    - SUPABASE_SERVICE_KEY — service role key used server-side
-    Schema: db/schema.sql (setup.sh runs \`psql "$SUPABASE_PROJECT_URL" -f db/schema.sql\` on first boot, idempotent via CREATE TABLE IF NOT EXISTS)
+    - SUPABASE_PROJECT_URL — base URL of the Supabase project (e.g. https://abc.supabase.co). REST API only.
+    - SUPABASE_SERVICE_KEY — service role key used server-side for PostgREST reads/writes
+    - SUPABASE_DB_URL — postgres DSN (postgresql://...) for DDL/migrations. SUPABASE_PROJECT_URL is REST-only and cannot run schema.sql; use the DSN with a real pg client.
+    Schema: db/schema.sql — applied at app startup by lib/migrate.ts using a \`pg\` client connected to SUPABASE_DB_URL, idempotent via CREATE TABLE IF NOT EXISTS. Do NOT use psql from setup.sh (binaries don't persist across machine restarts). Do NOT use the PostgREST \`exec_sql\` RPC — it doesn't exist on stock Supabase.
 
   - **Anthropic API** — Claude model calls for /prompt and /generate.
     Secrets:
@@ -173,9 +174,33 @@ Format each service as a markdown bullet followed by a "Secrets:" sub-list. The 
 Rules:
 - Declare EVERY external dependency the app actually uses. Missing declarations = missing env vars = runtime failures.
 - Name secrets with ALL_CAPS identifiers matching exactly the env var names the code expects — the parser uses these as env var names verbatim.
+- A single service MAY declare multiple secrets with different purposes (e.g. Supabase needs a REST URL, a service key, AND a postgres DSN for DDL). Declare every variable the code needs under that service's Secrets: list; the parser accumulates all of them.
 - The outer pipeline does NOT create, rotate, or manage the secret values themselves; it only propagates them from outer's own process.env. If a declared secret isn't set on outer, the devbox will spawn without it and the inner build will fail with a clear undefined-env error.
 - If the app has NO external services (pure static site, in-memory-only demo), omit this section entirely — the parser treats absence as "no external deps" and doesn't propagate anything.
 - This vocabulary is recursive: every level of Manifex (outer, inner, inner-inner) runs the same parser on its own Environment page. An inner app that declares its own Services gets the same secret plumbing as outer would, with no privileged shortcut.
+
+─── Section 4 (OPTIONAL): "REQUIRED SHAPE" code blocks ───
+
+When an implementation detail is non-negotiable — because of a bundler quirk, an external SSL handshake, a process-boundary constraint, an import resolution rule, or any other runtime truth the code agent can't see from inside its sandbox — the spec author CAN pin the file contents verbatim with a REQUIRED SHAPE fenced block. The /generate build agent treats these blocks as compiler-level contracts: it writes the file at the indicated path byte-for-byte without paraphrasing, refactoring, or "improving" the code.
+
+Format:
+
+  \`\`\`ts path=scripts/migrate.mjs REQUIRED SHAPE
+  import { readFileSync } from 'node:fs';
+  import { join } from 'node:path';
+  import pg from 'pg';
+  const { Client } = pg;
+  // ... full file contents, exact ...
+  \`\`\`
+
+Rules for using REQUIRED SHAPE in a spec page:
+- The info-string MUST contain \`path=<relative/path>\` and the literal tokens \`REQUIRED SHAPE\`. Both are parsed by /generate.
+- Put the ENTIRE file inside the fence. Partial skeletons don't work — the agent will copy whatever's in the fence verbatim, so include imports, exports, and every byte the file needs.
+- Prefer REQUIRED SHAPE for: schema-bootstrap scripts, webpack-externals-sensitive files, SSL/network glue that must use specific flags, pre-run orchestration scripts (run.sh, setup.sh variations), and any file where a previous generate cycle hallucinated a plausible-but-wrong implementation.
+- Do NOT use REQUIRED SHAPE for presentational components or business logic — that's what the rest of the spec describes. Reserve it for the 2-10% of files that have hard, non-obvious constraints.
+- When you add a REQUIRED SHAPE block to a spec page, also write one sentence of prose above the fence explaining WHY the shape is required. This makes it self-documenting and survives re-edits: "the pg import chain must stay out of the Next.js webpack bundle, so schema bootstrap lives in a standalone ESM script run by run.sh before next dev."
+
+Recursive rule: the REQUIRED SHAPE vocabulary works on every level of Manifex. Inner specs that include REQUIRED SHAPE blocks get the same byte-exact treatment from inner's own /generate agent, with no privileged outer shortcut.
 
 ─── SHALLOW PASS ───
 
@@ -484,11 +509,16 @@ export async function editManifestShallow(
   }
   userText += `USER REQUEST: ${prompt}\n\n---\n\nEmit a STRUCTURE-ONLY draft via emit_shallow_docs. Each page's content must be just the H1 title plus a short paragraph (2-4 sentences). Do NOT generate full sections, diagrams, or detailed lists — the deep pass will fill those in. Keep each page content under 300 characters.`;
 
+  // Ephemeral prompt cache on EDIT_SYSTEM — the 12 KB+ edit agent
+  // prompt is repeated on every prompt-bar edit. The array-block form
+  // with cache_control: ephemeral gives the 5-minute 10%-on-hit
+  // discount on successive calls. Claude Agent SDK handles this
+  // automatically on its path; this is the API-key-path equivalent.
   const resp = await client().messages.create({
     model: MODEL,
     max_tokens: 4000,
     temperature: 0,
-    system: EDIT_SYSTEM,
+    system: [{ type: 'text', text: EDIT_SYSTEM, cache_control: { type: 'ephemeral' } }],
     tools: [SHALLOW_DOCS_TOOL],
     tool_choice: { type: 'tool', name: 'emit_shallow_docs' },
     messages: [{ role: 'user', content: userText }],
@@ -596,11 +626,13 @@ export async function editManifest(
   }
   messageContent.push({ type: 'text', text: userText });
 
+  // Ephemeral prompt cache on EDIT_SYSTEM — see editManifestShallow
+  // above for the rationale. Same stable prefix across deep-pass calls.
   const resp = await client().messages.create({
     model: MODEL,
     max_tokens: 16000,
     temperature: options.variation ? 0.9 : 0,
-    system: EDIT_SYSTEM,
+    system: [{ type: 'text', text: EDIT_SYSTEM, cache_control: { type: 'ephemeral' } }],
     tools: options.forceUpdate ? [UPDATE_DOCS_TOOL] : [UPDATE_DOCS_TOOL, ASK_USER_TOOL],
     tool_choice: options.forceUpdate
       ? { type: 'tool', name: 'update_docs' }

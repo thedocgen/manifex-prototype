@@ -1,7 +1,8 @@
 import './globals.css';
+import { PRODUCT_NAME } from '@/lib/branding';
 
 export const metadata = {
-  title: 'Manifex — Spec-driven development for visionaries',
+  title: `${PRODUCT_NAME} — Spec-driven development for visionaries`,
   description: 'Describe your idea. Get a thorough technical specification and a working app built from it.',
 };
 

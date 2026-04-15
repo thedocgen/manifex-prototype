@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useRef, use } from 'react';
 import { useRouter } from 'next/navigation';
 import { Markdown, countMatches } from '@/components/Markdown';
 import type { ManifexSession, ManifestState, TreeNode, ConversationMessage, Question } from '@/lib/types';
+import { PRODUCT_NAME } from '@/lib/branding';
 import { generateSkeletonHtml } from '@/lib/skeleton';
 
 // Tiny SSE reader. Splits the body stream on `\n\n`, parses each event
@@ -237,6 +238,15 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   const [buildLog, setBuildLog] = useState<string>('');
   const [buildLogOpen, setBuildLogOpen] = useState<boolean>(false);
   const [provisionStage, setProvisionStage] = useState<string | null>(null);
+  // Phase 4 vault gate: when /devbox POST returns 409 missing_secrets we
+  // surface an inline modal prompting the user to paste each missing
+  // declared secret. On submit we write them to the vault via
+  // /api/manifex/secrets and retry the render.
+  const [missingSecrets, setMissingSecrets] = useState<
+    { key: string; description: string; service_name: string; service_description: string }[]
+  >([]);
+  const [secretInputs, setSecretInputs] = useState<Record<string, string>>({});
+  const [secretSubmitting, setSecretSubmitting] = useState(false);
   const buildLogSseRef = useRef<EventSource | null>(null);
   const buildLogRef = useRef<HTMLDivElement>(null);
   // Per-question answers for the active planning question group. Keyed by
@@ -268,8 +278,8 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
   useEffect(() => {
     if (typeof document === 'undefined') return;
     document.title = projectTitle === 'New Project'
-      ? 'Manifex — Spec-driven development for visionaries'
-      : `${projectTitle} · Manifex`;
+      ? `${PRODUCT_NAME} — Spec-driven development for visionaries`
+      : `${projectTitle} · ${PRODUCT_NAME}`;
   }, [projectTitle]);
 
   // Track whether conversation was loaded from server (skip persisting on restore)
@@ -708,6 +718,25 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
         // the log panel directly from that stream. The agent's raw
         // /__logs tail is still available on demand but no longer
         // automatically attached here (it would duplicate output).
+      } else if (dbRes.status === 409) {
+        // Phase 4 vault gate: route found doc-declared secrets that are
+        // neither in the project-scoped manifex_secrets vault nor in
+        // outer process.env. Surface the prompt-for-sensitive-info modal
+        // so the user can paste them in; submitMissingSecrets below
+        // writes them to the vault and retries the render.
+        const dbErr = await dbRes.json().catch(() => ({}));
+        const miss = Array.isArray(dbErr?.missing) ? dbErr.missing : [];
+        if (miss.length > 0) {
+          setMissingSecrets(miss);
+          setSecretInputs(Object.fromEntries(miss.map((m: any) => [m.key, ''])));
+          setBuildLog((prev) => prev + `[build] blocked: ${miss.length} secret${miss.length === 1 ? '' : 's'} needed — ${miss.map((m: any) => m.key).join(', ')}\n`);
+          setCompiling(false);
+          setProvisionStage(null);
+          return;
+        }
+        setPreviewError(dbErr?.error || 'Missing secrets.');
+        setCompiling(false);
+        return;
       } else if (dbRes.status === 503) {
         const dbErr = await dbRes.json().catch(() => ({}));
         setPreviewError(dbErr?.error || 'Too many devboxes are running. Stop one before opening another.');
@@ -1198,6 +1227,47 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
+  // Phase 4 vault gate: write every missing secret the user pasted into
+  // the vault via /api/manifex/secrets, then retry renderInBackground.
+  // This is separate from submitSecretAnswer (which handles Claude's
+  // in-generate ask_user flow) because the build-blocking gate fires
+  // BEFORE /generate and should not push follow-up prompts into the
+  // conversation.
+  const submitMissingSecrets = async () => {
+    if (!session || missingSecrets.length === 0) return;
+    // Require every field non-empty before POSTing.
+    const blanks = missingSecrets.filter((m) => !(secretInputs[m.key] || '').trim());
+    if (blanks.length > 0) {
+      setToast({ kind: 'error', msg: `Fill every field before saving (${blanks.map((b) => b.key).join(', ')}).` });
+      return;
+    }
+    setSecretSubmitting(true);
+    try {
+      for (const m of missingSecrets) {
+        const value = (secretInputs[m.key] || '').trim();
+        const res = await fetch('/api/manifex/secrets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ project_id: session.project_id, key: m.key, value }),
+        });
+        if (!res.ok) {
+          // Surface the real vault write error instead of claiming
+          // success and re-firing the modal on the next retry.
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err?.message || `vault write failed (${res.status})`);
+        }
+      }
+      setMissingSecrets([]);
+      setSecretInputs({});
+      setSecretSubmitting(false);
+      setToast({ kind: 'success', msg: 'Secrets saved. Retrying build…' });
+      renderInBackground();
+    } catch (e: any) {
+      setSecretSubmitting(false);
+      setToast({ kind: 'error', msg: `Failed to save secrets: ${e?.message || String(e)}` });
+    }
+  };
+
   const submitSecretAnswer = async (questionId: string, key: string, value: string) => {
     if (!session) return;
     // Store secret via separate endpoint
@@ -1342,6 +1412,109 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+      {/* Phase 4 vault gate: inline modal surfaced when /devbox POST returns
+          409 missing_secrets. Every doc-declared secret that isn't in the
+          project-scoped manifex_secrets vault or outer env gets a password
+          input here. Submit writes them to the vault via /api/manifex/secrets
+          and auto-retries renderInBackground. */}
+      {missingSecrets.length > 0 && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          data-testid="missing-secrets-modal"
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1000,
+            background: 'rgba(0,0,0,0.55)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <div
+            style={{
+              background: 'var(--bg-elev)',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: '24px 28px',
+              width: 560,
+              maxWidth: '92vw',
+              maxHeight: '90vh',
+              overflow: 'auto',
+              boxShadow: '0 12px 32px rgba(0,0,0,0.4)',
+            }}
+          >
+            <div style={{ fontSize: 16, fontWeight: 600, marginBottom: 6 }}>
+              Your app needs {missingSecrets.length === 1 ? 'a credential' : `${missingSecrets.length} credentials`} before it can build.
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 18 }}>
+              These were declared in your Environment page&apos;s Services section. Paste each value and they&apos;ll be stored securely in this project&apos;s vault — you won&apos;t be asked again.
+            </div>
+            {missingSecrets.map((m) => (
+              <div key={m.key} style={{ marginBottom: 16 }}>
+                <label style={{ display: 'block', fontSize: 13, fontWeight: 500, marginBottom: 4 }}>
+                  <span style={{ fontFamily: 'monospace' }}>{m.key}</span>
+                  {m.service_name && (
+                    <span style={{ color: 'var(--text-muted)', fontWeight: 400, marginLeft: 8 }}>
+                      — {m.service_name}
+                    </span>
+                  )}
+                </label>
+                {m.description && (
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>
+                    {m.description}
+                  </div>
+                )}
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  data-testid={`secret-input-${m.key}`}
+                  value={secretInputs[m.key] || ''}
+                  onChange={(e) =>
+                    setSecretInputs((prev) => ({ ...prev, [m.key]: e.target.value }))
+                  }
+                  placeholder={`paste ${m.key}`}
+                  disabled={secretSubmitting}
+                  style={{
+                    width: '100%',
+                    padding: '8px 10px',
+                    fontSize: 13,
+                    fontFamily: 'monospace',
+                    background: 'var(--bg)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 4,
+                    color: 'var(--text)',
+                  }}
+                />
+              </div>
+            ))}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 8 }}>
+              <button
+                className="mx-btn mx-btn-secondary"
+                disabled={secretSubmitting}
+                onClick={() => {
+                  setMissingSecrets([]);
+                  setSecretInputs({});
+                }}
+                style={{ padding: '7px 14px', fontSize: 13 }}
+              >
+                Cancel
+              </button>
+              <button
+                className="mx-btn"
+                data-testid="missing-secrets-submit"
+                disabled={secretSubmitting}
+                onClick={submitMissingSecrets}
+                style={{ padding: '7px 14px', fontSize: 13 }}
+              >
+                {secretSubmitting ? 'Saving…' : 'Save and retry build'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Top bar */}
       <header className="build-header" style={{
         display: 'flex',
@@ -1354,7 +1527,7 @@ export default function BuildPage({ params }: { params: Promise<{ id: string }> 
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <span className="mx-brand-mark" style={{ fontSize: '18px', cursor: 'pointer' }} onClick={() => router.push('/')}>
-            Manifex
+            {PRODUCT_NAME}
           </span>
           {pending && (
             <span style={{ fontSize: '12px', color: 'var(--warning)', fontWeight: 500 }}>

@@ -204,42 +204,20 @@ async function ensureWorkspaceVolume(appName: string): Promise<string> {
  * volume so node_modules + apt state survive stop/start. Returns the
  * new machine's id.
  */
-async function createMachine(appName: string, volumeId: string, environmentContent?: string): Promise<string> {
-  // Phase 4 parity: the devbox still runs no LLM itself, but inner
-  // Manifex (the user-built app running inside the devbox) expects
-  // the same env vars outer Manifex has so it can talk to real
-  // Supabase, the real Anthropic API, and the real Fly Machines
-  // API. We propagate them from manifex-wip's process.env at spawn
-  // time. All non-secret (URL) + secret (key) vars flow through the
-  // machine config env; Fly keeps them out of logs by default but
-  // they're not encrypted at rest on the machine — acceptable for
-  // v1 single-tenant ephemeral devboxes. Add proper secret plumbing
-  // in a later phase.
+async function createMachine(appName: string, volumeId: string, extraEnv?: Record<string, string>): Promise<string> {
+  // Phase 4 parity: doc-driven secret resolution now lives in the
+  // /devbox route handler, which vault-first-then-env-fallback resolves
+  // everything the Environment page's Services section declares and
+  // passes the result in as `extraEnv`. createMachine just merges it
+  // into the machine config env. This keeps the route as the single
+  // point that can 409 on missing secrets and surface the prompt UI.
   const parityEnv: Record<string, string> = { PORT: '8080' };
-  // Phase 4 parity, doc-driven: the env vars propagated come from the
-  // Environment page's Services section (see lib/manifest-services.ts).
-  // Recursive rule — no hardcoded secret list means any third-level
-  // devbox spawned from inside inner Manifex runs the same parser on
-  // its own Environment page and gets the same secret plumbing, no
-  // privileged outer shortcut. Missing secrets are logged; the inner
-  // build will fail with a clear undefined-env error if a declared
-  // secret isn't set on outer.
-  try {
-    const { parseEnvironmentServices, buildDevboxEnvFromServices } = await import('./manifest-services');
-    const parsed = parseEnvironmentServices(environmentContent || '');
-    const { env: declaredEnv, missing } = buildDevboxEnvFromServices(parsed, process.env);
-    Object.assign(parityEnv, declaredEnv);
-    if (parsed.services.length > 0) {
-      console.log(`[devbox] doc-declared services (${parsed.services.length}): ${parsed.services.map(s => s.name).join(' | ')}`);
-      console.log(`[devbox] propagating ${Object.keys(declaredEnv).length} declared secrets: ${Object.keys(declaredEnv).join(', ') || '(none present in outer env)'}`);
-    } else {
-      console.warn('[devbox] session Environment page declares no Services — inner build will run without any external credentials');
+  if (extraEnv && typeof extraEnv === 'object') {
+    Object.assign(parityEnv, extraEnv);
+    const keys = Object.keys(extraEnv);
+    if (keys.length > 0) {
+      console.log(`[devbox] ${appName} receiving ${keys.length} resolved secrets: ${keys.join(', ')}`);
     }
-    if (missing.length > 0) {
-      console.warn(`[devbox] declared secrets NOT set on manifex-wip env (inner build will likely fail): ${missing.join(', ')}`);
-    }
-  } catch (e: any) {
-    console.warn('[devbox] doc-driven env parse failed:', e?.message || e);
   }
   const body = {
     name: 'devbox',
@@ -319,7 +297,7 @@ export interface CreateDevboxError {
  */
 export async function createDevbox(
   sessionId: string,
-  opts: { environmentContent?: string } = {},
+  opts: { extraEnv?: Record<string, string> } = {},
 ): Promise<CreateDevboxResult | CreateDevboxError> {
   const appName = appNameFor(sessionId);
 
@@ -353,7 +331,7 @@ export async function createDevbox(
     await ensureApp(appName);
     await ensurePublicIp(appName);
     const volumeId = await ensureWorkspaceVolume(appName);
-    const machineId = await createMachine(appName, volumeId, opts.environmentContent);
+    const machineId = await createMachine(appName, volumeId, opts.extraEnv);
     return {
       ok: true,
       state: {

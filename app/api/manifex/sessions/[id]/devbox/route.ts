@@ -1,6 +1,22 @@
 import { NextResponse } from 'next/server';
-import { getSession, updateSession } from '@/lib/store';
+import { getSession, getSecrets, updateSession } from '@/lib/store';
 import { createDevbox, destroyDevbox, type DevboxState } from '@/lib/devbox';
+import { parseEnvironmentServices, resolveDevboxSecrets } from '@/lib/manifest-services';
+import { isClaudeAgentSdkBackend } from '@/lib/llm-backend';
+
+// Secrets the Manidex local-build path must gate on BEFORE running
+// /generate. These are the ones the GENERATED Manifex will need at
+// RUN time (not the ones Manidex's own build loop needs — those are
+// all Max OAuth + process.env on the dev machine). Manidex skips the
+// SUPABASE_* family entirely because it doesn't spawn a Fly devbox,
+// so devbox-spawn-time secrets don't apply.
+//
+// Intersected with the parsed Services declarations — if the spec
+// doesn't mention one of these, it's not gated.
+const MANIDEX_RUNTIME_SECRET_KEYS = new Set([
+  'ANTHROPIC_API_KEY',
+  'FLY_API_TOKEN',
+]);
 
 // GET — return the session's existing devbox state (or null).
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -19,6 +35,53 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
   const { id } = await params;
   const session = await getSession(id);
   if (!session) return NextResponse.json({ error: 'session not found' }, { status: 404 });
+
+  // Manidex local-build path: no Fly devbox, no spawn. Just gate on
+  // the runtime-only subset of declared secrets (ANTHROPIC_API_KEY +
+  // FLY_API_TOKEN) so the existing editor vault modal fires at the
+  // right moment — the editor's Build flow calls this route BEFORE
+  // /generate, so a 409 here triggers the modal, the user pastes, and
+  // the retry falls through to /generate which writes the compilation
+  // row. Nothing else happens in this branch; there's no devbox state
+  // to persist onto session.manifest_state.devbox.
+  if (isClaudeAgentSdkBackend()) {
+    const envContent = (session.manifest_state?.pages as any)?.environment?.content || '';
+    const parsed = parseEnvironmentServices(envContent);
+    // Intersect declared secrets with the Manidex runtime-gate set.
+    const gated = parsed.allSecretDecls.filter((d) => MANIDEX_RUNTIME_SECRET_KEYS.has(d.key));
+    let vault: Record<string, string> = {};
+    try {
+      vault = await getSecrets(session.project_id);
+    } catch (e: any) {
+      console.warn(`[devbox:manidex] getSecrets(${session.project_id}) failed:`, e?.message || e);
+    }
+    const missing = gated.filter((d) => !vault[d.key] || vault[d.key].length === 0);
+    if (missing.length > 0) {
+      console.warn(
+        `[devbox:manidex] blocked on missing runtime secrets for session ${id}: ${missing.map((m) => m.key).join(', ')}`,
+      );
+      return NextResponse.json(
+        {
+          error: 'missing_secrets',
+          reason: 'missing_secrets',
+          message: `Manidex build blocked: ${missing.length} runtime secret${missing.length === 1 ? '' : 's'} need to be vaulted before the generated Manifex can run.`,
+          missing: missing.map((m) => ({
+            key: m.key,
+            description: m.description,
+            service_name: m.service_name,
+            service_description: m.service_description,
+          })),
+        },
+        { status: 409 },
+      );
+    }
+    return NextResponse.json({
+      ok: true,
+      mode: 'manidex-local',
+      message: 'Manidex local-build mode — no devbox spawn, runtime secrets present in vault.',
+      gated_secrets: gated.map((d) => d.key),
+    });
+  }
 
   let existing: DevboxState | null = (session.manifest_state as any)?.devbox || null;
   if (existing?.url && existing?.machine_id) {
@@ -49,11 +112,51 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     existing = null;
   }
 
-  // Phase 4: pass the session's Environment page content so the
-  // doc-driven services parser can extract declared secrets and
-  // propagate matching outer env vars to the devbox at spawn time.
-  const environmentContent = (session.manifest_state?.pages as any)?.environment?.content;
-  const result = await createDevbox(id, { environmentContent });
+  // Phase 4 Path B: doc-driven secret resolution with vault-first lookup.
+  // Every ALL_CAPS identifier declared under a Services section's Secrets
+  // list is resolved against manifex_secrets (scoped by project_id) first,
+  // then falls back to outer process.env as a transitional layer. Anything
+  // still missing returns a 409 so the editor can surface the
+  // prompt-for-sensitive-info UI, the user pastes the value, it lands in
+  // the vault via /api/manifex/secrets, and the retry spawns cleanly.
+  //
+  // Recursive rule: inner Manifex runs this same code on its own Environment
+  // page against its own manifex_secrets table, so a third-level devbox
+  // inherits the same vault gating with no privileged outer shortcut.
+  const environmentContent = (session.manifest_state?.pages as any)?.environment?.content || '';
+  const parsed = parseEnvironmentServices(environmentContent);
+  let vault: Record<string, string> = {};
+  try {
+    vault = await getSecrets(session.project_id);
+  } catch (e: any) {
+    console.warn(`[devbox] getSecrets(${session.project_id}) failed:`, e?.message || e);
+  }
+  const { env: resolvedEnv, missing } = resolveDevboxSecrets(parsed, {
+    vault,
+    env: process.env,
+    allowEnvFallback: true,
+  });
+  if (missing.length > 0) {
+    console.warn(
+      `[devbox] blocked on missing secrets for session ${id}: ${missing.map((m) => m.key).join(', ')}`,
+    );
+    return NextResponse.json(
+      {
+        error: 'missing_secrets',
+        reason: 'missing_secrets',
+        message: `Cannot spawn devbox: ${missing.length} declared secret${missing.length === 1 ? '' : 's'} not in vault or environment.`,
+        missing: missing.map((m) => ({
+          key: m.key,
+          description: m.description,
+          service_name: m.service_name,
+          service_description: m.service_description,
+        })),
+      },
+      { status: 409 },
+    );
+  }
+
+  const result = await createDevbox(id, { extraEnv: resolvedEnv });
   if (!result.ok) {
     const status = result.reason === 'cap_exceeded' ? 503 : 500;
     return NextResponse.json({ error: result.message, reason: result.reason }, { status });

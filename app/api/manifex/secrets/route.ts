@@ -8,10 +8,12 @@ function client() {
   return createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false } });
 }
 
-// In-memory fallback when manifex_secrets table doesn't exist yet
-const memorySecrets: Map<string, { key: string; value: string; created_at: string }> = new Map();
-
-// Store a secret
+// Store a secret. Writes MUST persist to manifex_secrets in Supabase —
+// the previous in-memory Map fallback masked a missing-table config bug
+// and the devbox vault gate re-fired the prompt modal on every retry
+// because reads (getSecrets) go straight to Postgres and never see the
+// in-memory shim. No plaintext fallback anywhere; misconfiguration
+// surfaces as a loud 500.
 export async function POST(req: Request) {
   const body = await req.json().catch(() => ({}));
   const { project_id, key, value } = body;
@@ -19,15 +21,24 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'project_id, key, and value required' }, { status: 400 });
   }
 
-  // Try Supabase first, fall back to in-memory
   const { error } = await client()
     .from('manifex_secrets')
     .upsert({ project_id, key, value }, { onConflict: 'project_id,key' });
 
   if (error) {
-    // Table might not exist — use in-memory fallback
-    console.warn('manifex_secrets write error (using memory fallback):', error.message);
-    memorySecrets.set(`${project_id}:${key}`, { key, value, created_at: new Date().toISOString() });
+    const code = (error as any).code || '';
+    const tableMissing = code === 'PGRST205' || code === '42P01' || /manifex_secrets/.test(error.message || '');
+    console.error('[secrets] upsert failed:', { code, message: error.message });
+    return NextResponse.json(
+      {
+        error: 'vault_write_failed',
+        code,
+        message: tableMissing
+          ? 'manifex_secrets table is missing from production Supabase. Apply db/schema.sql before pasting secrets.'
+          : error.message,
+      },
+      { status: 500 },
+    );
   }
 
   return NextResponse.json({ success: true, key });
@@ -47,12 +58,12 @@ export async function GET(req: Request) {
     .eq('project_id', projectId);
 
   if (error) {
-    // Fallback to in-memory
-    const results: { key: string; created_at: string }[] = [];
-    for (const [k, v] of memorySecrets) {
-      if (k.startsWith(`${projectId}:`)) results.push({ key: v.key, created_at: v.created_at });
-    }
-    return NextResponse.json({ secrets: results });
+    const code = (error as any).code || '';
+    console.error('[secrets] list failed:', { code, message: error.message });
+    return NextResponse.json(
+      { error: 'vault_read_failed', code, message: error.message },
+      { status: 500 },
+    );
   }
 
   return NextResponse.json({ secrets: (data || []).map(s => ({ key: s.key, created_at: s.created_at })) });

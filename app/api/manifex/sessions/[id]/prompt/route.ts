@@ -1,7 +1,27 @@
 import { NextResponse } from 'next/server';
 import { getSession, updateSession, makeManifestState } from '@/lib/store';
 import { editManifest, editManifestShallow } from '@/lib/modal';
+import { runDocGenerationLoop, isClaudeAgentSdkBackend } from '@/lib/llm-backend';
 import type { ConversationMessage, DocPage, TreeNode } from '@/lib/types';
+
+// Phase 5 Manidex: /prompt dispatches on MANIFEX_LLM_BACKEND.
+//
+// When MANIFEX_LLM_BACKEND=claude-agent-sdk (local Manidex dev), doc
+// edits run through lib/llm-backend.ts's runDocGenerationLoop — an
+// agent loop that writes 7 markdown files into a throwaway temp dir
+// and reads them back. Uses the user's Claude Max OAuth via the SDK
+// subprocess; zero marginal cost.
+//
+// When MANIFEX_LLM_BACKEND is unset or "anthropic-sdk" (cloud Manifex
+// or prod-parity local dev), doc edits run through the existing
+// editManifest/editManifestShallow tool_choice path in lib/modal.ts.
+// That path is untouched — structured shallow+deep output, fast
+// initial draft, preserved for Fly deploys.
+//
+// Both paths emit the same 'draft'/'complete'/'error' SSE event shape
+// so the editor prompt-bar UI works unchanged. The agent-loop path
+// collapses shallow+deep into a single pass — no 'draft' event is
+// emitted before 'complete' in that branch.
 
 function classifyError(e: any): { status: number; kind: string; userMessage: string; detail: string } {
   const msg: string = e?.message || 'unknown error';
@@ -77,6 +97,114 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
     let controllerClosed = false;
 
     log('start');
+
+    // Manidex (claude-agent-sdk) dispatch — single-pass agent loop that
+    // writes 7 markdown files to a temp dir and reads them back.
+    // Emits a 'complete' event at the end (no shallow/deep split).
+    if (isClaudeAgentSdkBackend()) {
+      log('dispatch=claude-agent-sdk (runDocGenerationLoop)');
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const send = (event: string, payload: any) => {
+            if (controllerClosed) return false;
+            try {
+              controller.enqueue(encoder.encode(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`));
+              return true;
+            } catch (e: any) {
+              log(`send(${event}) threw: ${e?.message}`);
+              controllerClosed = true;
+              return false;
+            }
+          };
+          const safeClose = () => {
+            if (controllerClosed) return;
+            try { controller.close(); } catch {}
+            controllerClosed = true;
+          };
+
+          try {
+            const docStarted = Date.now();
+            const docResult = await runDocGenerationLoop(
+              id,
+              { pages: session.manifest_state.pages, tree: session.manifest_state.tree },
+              prompt,
+              // Emit agent-loop events (iteration / tool_use / tool_result /
+              // assistant_text / backend_init) to the SSE stream so the editor
+              // build-log overlay can show Claude's progress live.
+              (event, data) => { send(event, data); },
+            );
+
+            const proposed = makeManifestState(docResult.pages, docResult.tree);
+            const nowIso = new Date().toISOString();
+            const userMessage: ConversationMessage = {
+              role: 'user',
+              content: prompt,
+              answers: body.answers,
+              timestamp: nowIso,
+            };
+            const assistantMessage: ConversationMessage = {
+              role: 'assistant',
+              content: docResult.diff_summary || 'Changes applied.',
+              diff_summary: docResult.diff_summary,
+              changed_pages: docResult.changed_pages,
+              timestamp: nowIso,
+            };
+            const finalManifest = {
+              ...session.manifest_state,
+              conversation: [...existingConversation, userMessage, assistantMessage],
+            };
+            log(`doc-gen complete: ${docResult.changed_pages.length} changed pages in ${docResult.iterations} iter / ${docResult.duration_ms}ms`);
+            const updated = await updateSession(id, {
+              manifest_state: finalManifest,
+              pending_attempt: {
+                prompt,
+                proposed_manifest: proposed,
+                diff_summary: docResult.diff_summary,
+                changed_pages: docResult.changed_pages,
+                attempt_number: 1,
+                draft: false,
+              },
+            });
+            send('complete', {
+              session: updated,
+              response_type: 'update',
+              diff_summary: docResult.diff_summary,
+              elapsed_ms: Date.now() - docStarted,
+            });
+            safeClose();
+          } catch (outer: any) {
+            log(`runDocGenerationLoop crashed: ${outer?.message}`);
+            // Clear any stale draft flag so the editor UI unsticks.
+            try {
+              const refreshed = await getSession(id);
+              if (refreshed?.pending_attempt?.draft) {
+                await updateSession(id, {
+                  pending_attempt: { ...refreshed.pending_attempt, draft: false },
+                });
+              }
+            } catch {}
+            send('error', {
+              error: outer?.message || 'doc generation crashed',
+              kind: 'unknown',
+            });
+            safeClose();
+          }
+        },
+        cancel(reason) {
+          log(`stream cancelled by consumer: ${reason || '(no reason)'}`);
+          controllerClosed = true;
+        },
+      });
+
+      return new Response(stream, {
+        headers: {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache, no-transform',
+          'connection': 'keep-alive',
+          'x-accel-buffering': 'no',
+        },
+      });
+    }
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -400,6 +528,62 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   // ─────────────────────────────────────────────────────────────────────
   // Non-SSE (legacy single-pass) branch
   // ─────────────────────────────────────────────────────────────────────
+
+  // Manidex dispatch on the non-SSE path too — for curl / programmatic
+  // callers that don't set Accept: text/event-stream. Image uploads fall
+  // through to editManifest because the agent loop doesn't carry image
+  // inputs yet; governor's brief put image support out of scope.
+  if (isClaudeAgentSdkBackend() && !image) {
+    try {
+      const docResult = await runDocGenerationLoop(
+        id,
+        { pages: session.manifest_state.pages, tree: session.manifest_state.tree },
+        prompt,
+        // No SSE consumer here — drop events to a no-op sink.
+        () => {},
+      );
+      const proposed = makeManifestState(docResult.pages, docResult.tree);
+      const nowIso = new Date().toISOString();
+      const userMessage: ConversationMessage = {
+        role: 'user',
+        content: prompt,
+        answers: body.answers,
+        timestamp: nowIso,
+      };
+      const assistantMessage: ConversationMessage = {
+        role: 'assistant',
+        content: docResult.diff_summary || 'Changes applied.',
+        diff_summary: docResult.diff_summary,
+        changed_pages: docResult.changed_pages,
+        timestamp: nowIso,
+      };
+      const updatedManifest = {
+        ...session.manifest_state,
+        conversation: [...existingConversation, userMessage, assistantMessage],
+      };
+      const updated = await updateSession(id, {
+        manifest_state: updatedManifest,
+        pending_attempt: {
+          prompt,
+          proposed_manifest: proposed,
+          diff_summary: docResult.diff_summary,
+          changed_pages: docResult.changed_pages,
+          attempt_number: 1,
+          draft: false,
+        },
+      });
+      return NextResponse.json({
+        session: updated,
+        response_type: 'update',
+        diff_summary: docResult.diff_summary,
+      });
+    } catch (e: any) {
+      const cls = classifyError(e);
+      console.error('[prompt] runDocGenerationLoop failed:', cls.kind, cls.detail);
+      return NextResponse.json({ error: cls.userMessage, kind: cls.kind, detail: cls.detail }, { status: cls.status });
+    }
+  }
+
   let response;
   try {
     response = await editManifest(session.manifest_state, prompt, {

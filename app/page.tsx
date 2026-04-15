@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { ManifexProject } from '@/lib/types';
+import { PRODUCT_NAME } from '@/lib/branding';
 
 function timeAgo(iso: string): string {
   const t = new Date(iso).getTime();
@@ -16,7 +17,64 @@ function timeAgo(iso: string): string {
   return `${days} day${days !== 1 ? 's' : ''} ago`;
 }
 
-export default function HomePage() {
+// Manidex home: a single-purpose internal dev tool. One button that
+// opens the canonical Manifex-on-Manifex spec session in the editor.
+// No create-project form, no project list — Manidex devs work on one
+// spec only. Cloud Manifex keeps the full multi-project home below.
+function ManidexHome() {
+  const router = useRouter();
+  const specSessionId = (process.env.NEXT_PUBLIC_MANIFEX_SPEC_SESSION_ID || 'e1b1fd0a-16be-4dd9-ae45-8657bb46a38a').trim();
+  return (
+    <div style={{
+      minHeight: '100vh',
+      background: 'var(--bg)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      fontFamily: 'var(--font-sans)',
+    }}>
+      <div style={{
+        maxWidth: 520,
+        padding: '48px 40px',
+        textAlign: 'center',
+      }}>
+        <h1 style={{
+          fontSize: '56px',
+          fontWeight: 700,
+          letterSpacing: '-0.03em',
+          margin: '0 0 12px',
+          lineHeight: 1.1,
+          color: 'var(--text)',
+        }}>
+          {PRODUCT_NAME}
+        </h1>
+        <p style={{
+          fontSize: '17px',
+          color: 'var(--text-muted)',
+          margin: '0 0 36px',
+          lineHeight: 1.5,
+        }}>
+          The internal tool that builds Manifex.
+        </p>
+        <button
+          onClick={() => router.push(`/${specSessionId}`)}
+          className="mx-btn"
+          style={{
+            padding: '14px 28px',
+            fontSize: '15px',
+            fontWeight: 600,
+            borderRadius: 8,
+            cursor: 'pointer',
+          }}
+        >
+          View Manifex Docs →
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ManifexHome() {
   const router = useRouter();
   const [builds, setBuilds] = useState<ManifexProject[]>([]);
   const [prompt, setPrompt] = useState('');
@@ -117,7 +175,7 @@ export default function HomePage() {
             lineHeight: 1.15,
             color: 'var(--text)',
           }}>
-            Manifex
+            {PRODUCT_NAME}
           </h1>
           <p style={{
             fontSize: '18px',
@@ -261,3 +319,11 @@ export default function HomePage() {
     </div>
   );
 }
+
+// Pick the home surface at module load — Manidex gets a single-button
+// CTA (ManidexHome above), Manifex gets the full multi-project home
+// (ManifexHome). Choosing the component here rather than branching
+// inside a render keeps each component's hooks stable and avoids a
+// conditional-hook-call violation.
+const HomePage = PRODUCT_NAME === 'Manifex' ? ManifexHome : ManidexHome;
+export default HomePage;
