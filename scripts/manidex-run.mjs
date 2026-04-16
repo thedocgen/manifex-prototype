@@ -153,13 +153,18 @@ async function fetchVaultSecrets() {
 // dependency — script stays standalone).
 // ───────────────────────────────────────────────────────────────────
 async function fetchLatestCompilation() {
-  const COMPILER_VERSION = 'manidex-claude-agent-sdk-v1';
+  // Accept ANY manidex-claude-agent-sdk-* version (mirrors the cross-version
+  // compat fix in generate/route.ts at c0fe975). Compiler version bumps
+  // (v1→v2→v3) change the cache key but the codex_files are source code
+  // compatible across versions. Without this, the watch loop started under
+  // v1 can't see v3 rows and the hot-patch stalls silently.
+  const COMPILER_VERSION_LIKE = 'manidex-claude-agent-sdk-%';
   const base = `${SUPABASE_URL.replace(/\/+$/, '')}/rest/v1/manifex_compilations`;
   const params = new URLSearchParams({
     select: 'manifest_sha,compiler_version,created_at,codex_files',
-    compiler_version: `eq.${COMPILER_VERSION}`,
+    compiler_version: `like.${COMPILER_VERSION_LIKE}`,
     order: 'created_at.desc',
-    limit: requestedSha ? '1' : '1',
+    limit: '1',
   });
   if (requestedSha) params.set('manifest_sha', `eq.${requestedSha}`);
   const res = await fetch(`${base}?${params}`, {
@@ -175,8 +180,8 @@ async function fetchLatestCompilation() {
   const rows = await res.json();
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error(requestedSha
-      ? `No compilation row for manifest_sha=${requestedSha} (compiler_version=${COMPILER_VERSION})`
-      : `No compilation rows at all (compiler_version=${COMPILER_VERSION}). Click Build in Manidex first.`);
+      ? `No compilation row for manifest_sha=${requestedSha}`
+      : `No compilation rows at all. Click Build in Manidex first.`);
   }
   return rows[0];
 }
