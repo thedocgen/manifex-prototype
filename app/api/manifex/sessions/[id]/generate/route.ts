@@ -4,7 +4,7 @@ import { runBuildAgent, isClaudeAgentSdkBackend } from '@/lib/llm-backend';
 import { parseEnvironmentServices } from '@/lib/manifest-services';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
-const MANIDEX_COMPILER_VERSION = 'manidex-claude-agent-sdk-v1';
+const MANIDEX_COMPILER_VERSION = 'manidex-claude-agent-sdk-v2';
 
 // Magic key inside codex_files that stores the session
 // manifest_state.pages snapshot for incremental diffs. Keys with
@@ -13,6 +13,7 @@ const MANIDEX_COMPILER_VERSION = 'manidex-claude-agent-sdk-v1';
 // skipped by the CLI write-back. See lib/llm-backend.ts for the
 // matching prefix constant.
 const MANIDEX_STATE_SNAPSHOT_KEY = '__manidex_state_snapshot__';
+const MANIDEX_PAGE_FILES_MAP_KEY = '__manidex_page_files_map__';
 
 // Keep in sync with app/api/manifex/sessions/[id]/devbox/route.ts.
 // These are the declared secrets Manidex gates on before /generate —
@@ -326,6 +327,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
           // reliable source for determinism.
           let previousCodexFiles: Record<string, string> | undefined;
           let previousPages: Record<string, { title: string; content: string }> | undefined;
+          let previousPageFilesMap: Record<string, string[]> | undefined;
           try {
             const { data: prevRows, error: prevErr } = await supabaseAdmin()
               .from('manifex_compilations')
@@ -348,6 +350,19 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
                 if (typeof v === 'string') seededFiles[k] = v;
               }
               previousCodexFiles = seededFiles;
+              // Extract page→files map if present (improvement B).
+              const mapRaw = prevFiles[MANIDEX_PAGE_FILES_MAP_KEY];
+              if (typeof mapRaw === 'string') {
+                try {
+                  const mapParsed = JSON.parse(mapRaw);
+                  if (mapParsed && typeof mapParsed === 'object') {
+                    previousPageFilesMap = mapParsed as Record<string, string[]>;
+                    console.log(`[generate:manidex] loaded page→files map: ${Object.keys(mapParsed).length} pages mapped`);
+                  }
+                } catch (e: any) {
+                  console.warn(`[generate:manidex] page-files-map parse failed: ${e?.message || e}`);
+                }
+              }
               if (typeof snapshotRaw === 'string') {
                 try {
                   const parsed = JSON.parse(snapshotRaw);
@@ -388,6 +403,7 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
               previousCodexFiles,
               previousPages,
               currentPages: session.manifest_state.pages as Record<string, { title: string; content: string }>,
+              previousPageFilesMap,
             },
           );
           const files = result.codex_files || {};
@@ -412,6 +428,15 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
             );
           } catch (e: any) {
             console.warn(`[generate:manidex] snapshot serialize failed: ${e?.message || e}`);
+          }
+          // Inject the page→files map if the agent wrote one.
+          if (result.page_files_map && Object.keys(result.page_files_map).length > 0) {
+            try {
+              filesWithSnapshot[MANIDEX_PAGE_FILES_MAP_KEY] = JSON.stringify(result.page_files_map);
+              console.log(`[generate:manidex] injected page→files map: ${Object.keys(result.page_files_map).length} pages`);
+            } catch (e: any) {
+              console.warn(`[generate:manidex] page-files-map serialize failed: ${e?.message || e}`);
+            }
           }
           const { error: upsertErr } = await supabaseAdmin()
             .from('manifex_compilations')

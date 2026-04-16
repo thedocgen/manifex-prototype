@@ -298,6 +298,10 @@ export interface BuildAgentResult {
   // pre-seeded cwd (previousCodexFiles provided). False/undefined
   // when it was a cold scaffold.
   incremental?: boolean;
+  // Agent-written page→files mapping (from .manidex/page-files-map.json).
+  // The route injects this as a magic key into codex_files before upsert
+  // so the NEXT incremental run can use it as a hint.
+  page_files_map?: Record<string, string[]>;
 }
 
 // Page-level snapshot used for diff computation in the incremental
@@ -331,6 +335,11 @@ export interface RunBuildAgentOpts {
   // pages. The agent's user message focuses on these changes
   // instead of restating the full spec.
   currentPages?: ManidexPagesSnapshot;
+  // Page→files map from the previous compilation. When present, the
+  // incremental user message includes a hint block listing which
+  // source files each changed page drives, so the agent can skip
+  // Glob/Grep discovery and go straight to Read + Edit.
+  previousPageFilesMap?: Record<string, string[]>;
 }
 
 export async function runBuildAgent(
@@ -530,6 +539,24 @@ Rules:
 3. REQUIRED ROUTES composes with REQUIRED SHAPE. If the same path has a REQUIRED SHAPE fenced block elsewhere in the spec, REQUIRED SHAPE wins (copy the fence verbatim). If only REQUIRED ROUTES, implement the described behavior using your judgment.
 4. The distinction between "Files" subsections and "REQUIRED ROUTES" is prescriptive vs descriptive: "Files" describes what exists; "REQUIRED ROUTES" tells you what must exist. A missing REQUIRED ROUTES path is a bug you must fix.
 
+── PAGE→FILES MAP ──
+
+After all your edits are done and BEFORE emitting BUILD_SUMMARY, write a JSON file at \`.manidex/page-files-map.json\` mapping each spec page to the source files it primarily drives. Format:
+
+\`\`\`json
+{
+  "overview": ["app/page.tsx", "app/layout.tsx"],
+  "environment": ["package.json", "setup.sh", "run.sh", "next.config.ts", "postcss.config.mjs"],
+  "how-it-works": ["lib/devbox.ts", "lib/modal.ts"],
+  "pages-and-layout": ["app/[id]/page.tsx", "app/api/manifex/sessions/[id]/generate/route.ts"],
+  "look-and-feel": ["app/globals.css", "tailwind.config.ts"],
+  "data-and-storage": ["db/schema.sql", "lib/store.ts", "lib/supabase.ts"],
+  "tests": ["__tests__/editor.test.ts"]
+}
+\`\`\`
+
+Every page path in the spec tree MUST have a key. List only the 1-5 most directly related source files per page — the files a narrow edit to THAT page would touch. This map is metadata (stored in .manidex/, not shipped to production). It tells future incremental builds exactly where to look so they skip Glob/Grep discovery turns.
+
 Be efficient. Batch Write calls. Do not re-read files you just wrote. Do not ls the same directory twice in a row. Do not escape the cwd. The directory is ephemeral — whatever you leave on disk when BUILD_SUMMARY fires is what gets persisted into manifex_compilations.`;
 
 // Incremental system prompt — used when a previous compilation has
@@ -576,6 +603,10 @@ REQUIRED ROUTES composes with REQUIRED SHAPE: if a route file is ALSO pinned wit
 
 Unless explicitly mentioned in the changed pages or a REQUIRED SHAPE block in a changed page, preserve these files byte-for-byte: node_modules (doesn't exist in cwd anyway), package-lock.json, .next, .git. The runner handles dependencies out-of-loop.
 
+── PAGE→FILES MAP ──
+
+After your edits and BEFORE emitting BUILD_SUMMARY, update the file at \`.manidex/page-files-map.json\` — read the existing map if present, then add or update entries for the pages you touched. Each key is a spec page path, each value is an array of the 1-5 source files that page primarily drives. If the file already has correct entries for pages you didn't touch, preserve them. This map tells the NEXT incremental build where to look so it skips Glob/Grep. It's metadata, not shipped to production.
+
 Be efficient. Your output is the filesystem state when BUILD_SUMMARY fires. Every file you leave alone is preserved in the next compilation row. Every file you write or edit becomes part of the diff. Nothing is implicitly regenerated.`;
 
 // Magic key prefix used to store incremental-compilation metadata
@@ -585,6 +616,7 @@ Be efficient. Your output is the filesystem state when BUILD_SUMMARY fires. Ever
 // the CLI skips them when writing to disk.
 const MANIDEX_META_KEY_PREFIX = '__manidex_';
 const MANIDEX_STATE_SNAPSHOT_KEY = '__manidex_state_snapshot__';
+const MANIDEX_PAGE_FILES_MAP_KEY = '__manidex_page_files_map__';
 
 // Directories to skip when serializing the temp dir into
 // manifex_compilations.codex_files. Split into two tiers:
@@ -614,6 +646,7 @@ const CODEX_ALWAYS_SKIP_DIRS = new Set([
   '.turbo',
   '.vercel',
   '.manifex',
+  '.manidex', // metadata dir — page-files-map.json lives here, not source
 ]);
 const CODEX_ROOT_ONLY_SKIP_DIRS = new Set([
   'dist',
@@ -926,19 +959,36 @@ ${aPrefix}${aHunk}${aSuffix}`;
 
 ${buildPageDiffBlock(p)}`).join('\n\n---\n\n');
 
+      // Page→files map hint: if the previous compilation included a
+      // map of spec-page → source-files, surface it so the agent can
+      // skip Glob/Grep discovery turns and go straight to Read + Edit.
+      // Only show entries for the changed pages — unchanged pages'
+      // files don't need to be touched.
+      let pageFilesHint = '';
+      if (opts.previousPageFilesMap && Object.keys(opts.previousPageFilesMap).length > 0) {
+        const changedPaths = new Set(diff.map((p) => p.path));
+        const relevantEntries = Object.entries(opts.previousPageFilesMap)
+          .filter(([pagePath]) => changedPaths.has(pagePath))
+          .map(([pagePath, files]) => `  ${pagePath} → ${files.join(', ')}`);
+        if (relevantEntries.length > 0) {
+          pageFilesHint = `\nPAGE → FILES MAP (from previous compilation — start here, skip Glob/Grep):\n${relevantEntries.join('\n')}\nRead these files directly, then Edit the ones that need to change.\n`;
+        }
+      }
+
       userPrompt = `The Manifex codebase in your working directory is already scaffolded. The user just made a narrow edit to the spec. Apply the corresponding code change as a surgical edit — minimal, scoped, reviewable. Think git commit.
 
 Changed spec pages (${diff.length}):
 
 ${diffBlocks}
-${requiredRoutesBlock}
+${pageFilesHint}${requiredRoutesBlock}
 Your job:
-1. Identify which source files correspond to the changed page${diff.length === 1 ? '' : 's'}. Use Glob/Grep to find them by content; don't guess.
-2. Read the files. Understand their current state.
+1. ${pageFilesHint ? 'Read the files listed in the PAGE → FILES MAP above.' : `Identify which source files correspond to the changed page${diff.length === 1 ? '' : 's'}. Use Glob/Grep to find them by content; don't guess.`}
+2. ${pageFilesHint ? 'Understand their current state, then apply the minimal edit.' : 'Read the files. Understand their current state.'}
 3. Apply the minimal edit that brings the code in line with the new doc content. Prefer Edit over Write.
 4. For any REQUIRED ROUTES path above: Glob/Read to check if it exists. If absent, CREATE it with Write using the bullet's prose description as the spec. If present, verify it matches and Edit if not. Missing REQUIRED ROUTES are bugs to fix, not notes to ignore.
 5. Leave every unrelated file byte-for-byte identical. Do not "also refactor while you're here".
-6. Finish with "BUILD_SUMMARY: <one sentence>".
+6. Update \`.manidex/page-files-map.json\` with any new or changed page→file mappings.
+7. Finish with "BUILD_SUMMARY: <one sentence>".
 
 manifest_sha: ${manifestSha.slice(0, 12)}`;
       systemPromptVariant = SYSTEM_PROMPT_MANIDEX_INCREMENTAL;
@@ -1047,6 +1097,24 @@ ${specMd}
     try { q.close(); } catch {}
   }
 
+  // Read the page→files map BEFORE walking (the .manidex/ dir is in
+  // CODEX_ALWAYS_SKIP_DIRS so walkAndSerialize won't pick it up). Parse
+  // and include in the result so the route can inject it as a magic key.
+  let pageFilesMap: Record<string, string[]> | undefined;
+  try {
+    const mapPath = `${cwd}/.manidex/page-files-map.json`;
+    const mapRaw = await fs.readFile(mapPath, 'utf-8');
+    const parsed = JSON.parse(mapRaw);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      pageFilesMap = parsed as Record<string, string[]>;
+      console.log(`[manidex] page-files-map.json: ${Object.keys(parsed).length} pages mapped`);
+    }
+  } catch {
+    // Agent didn't write the map (first attempt, or it errored).
+    // Non-fatal — next run just won't have hints.
+    console.log('[manidex] .manidex/page-files-map.json not found — no page→files hint for next run');
+  }
+
   // Walk the temp dir, serialize the file tree into a plain object,
   // then wipe the dir. The /generate route upserts the codex_files
   // map into manifex_compilations keyed on (manifest_sha, compiler_version).
@@ -1097,6 +1165,7 @@ ${specMd}
     preserved_files: preservedFiles,
     total_files: totalFiles,
     incremental,
+    page_files_map: pageFilesMap,
   };
 }
 
