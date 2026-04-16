@@ -1,6 +1,15 @@
 import { getSession } from '@/lib/store';
 import type { ManifexSession } from '@/lib/types';
 
+// Phase A3: routes to pre-warm after the dev server is up but BEFORE
+// emitting the 'done' event. Sequential (not parallel) to stay under
+// the 1GB Fly machine memory ceiling during Next.js on-demand compile.
+// '/' is already warm from the wait_port poll but is re-probed as a
+// sanity check. The other routes are the most-likely first clicks
+// after the editor iframe loads.
+const PREWARM_ROUTES = ['/', '/api/manifex/projects', '/_not-found'];
+const PREWARM_ROUTE_TIMEOUT_MS = 90_000;
+
 // Phase 2C split — /build (pure bash, NO Claude).
 //
 // Runs setup.sh + run.sh on the session's devbox via /__exec. Streams
@@ -86,7 +95,7 @@ async function exec(
   };
 }
 
-export async function POST(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const session = await getSession(id);
   if (!session) {
@@ -170,6 +179,70 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
           });
           return;
         }
+
+        // ── Phase A3: pre-warm major routes ──────────────────────────
+        // Sequential fetches that trigger Next.js on-demand compilation
+        // for each route BEFORE emitting 'done'. This blocks /build by
+        // ~15-30s extra but gives the user ≤5s first-paint when the
+        // iframe loads and they navigate to any pre-warmed route.
+        //
+        // Skip via ?skip_prewarm=1 for A/B comparison during testing.
+        const skipPrewarm = new URL(req.url).searchParams.get('skip_prewarm') === '1';
+        if (!skipPrewarm && PREWARM_ROUTES.length > 0) {
+          const prewarmStarted = Date.now();
+          let successCount = 0;
+          let failureCount = 0;
+          let aborted = false;
+          emit('prewarm_start', { routes: PREWARM_ROUTES });
+
+          for (const route of PREWARM_ROUTES) {
+            if (aborted) break;
+            const routeStarted = Date.now();
+            try {
+              const res = await fetch(`${base}${route}`, {
+                cache: 'no-store',
+                signal: AbortSignal.timeout(PREWARM_ROUTE_TIMEOUT_MS),
+              });
+              const compiledMs = Date.now() - routeStarted;
+              const statusCode = res.status;
+              // Any 2xx/3xx/4xx means the route compiled (even a 404 on
+              // /api/manifex/projects is fine — the Next.js compilation
+              // still happened). 502/503 means the dev server crashed or
+              // is unreachable — bail to avoid hiding a real failure.
+              if (statusCode >= 500) {
+                emit('prewarm', { route, ok: false, status_code: statusCode, compiled_ms: compiledMs, error: `server error ${statusCode}` });
+                failureCount++;
+                // Bail: 5xx likely means run.sh crashed and further
+                // pre-warms will all fail the same way.
+                emit('prewarm_aborted', { reason: `${route} returned ${statusCode} — dev server may be down`, after_route: route });
+                aborted = true;
+              } else {
+                emit('prewarm', { route, ok: true, status_code: statusCode, compiled_ms: compiledMs });
+                successCount++;
+              }
+            } catch (e: unknown) {
+              const compiledMs = Date.now() - routeStarted;
+              const msg = e instanceof Error ? e.message : String(e);
+              const isTimeout = /abort|timeout/i.test(msg);
+              emit('prewarm', { route, ok: false, status_code: null, compiled_ms: compiledMs, error: isTimeout ? `timeout (${PREWARM_ROUTE_TIMEOUT_MS}ms)` : msg });
+              failureCount++;
+              // Timeout on a single route is non-fatal (might be a very
+              // heavy page). But a connection error means the server is
+              // gone — bail.
+              if (!isTimeout) {
+                emit('prewarm_aborted', { reason: `${route} connection failed: ${msg}`, after_route: route });
+                aborted = true;
+              }
+            }
+          }
+          emit('prewarm_done', {
+            total_ms: Date.now() - prewarmStarted,
+            success_count: successCount,
+            failure_count: failureCount,
+            aborted,
+          });
+        }
+
         emit('done', { dev_port: devPort, wait_ms: Date.now() - waitStarted });
       } catch (e: any) {
         emit('error', { stage: 'unknown', message: e?.message || String(e) });
