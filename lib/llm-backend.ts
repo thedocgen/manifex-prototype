@@ -756,6 +756,125 @@ function computePageDiff(
   return changed;
 }
 
+// ───────────────────────────────────────────────────────────────────
+// buildPageDiffBlock — formats BEFORE/AFTER for a single ChangedPage.
+// Used by both serial (N≤1) and parallel (N≥2) incremental paths.
+// Hoisted to module scope so both paths can reference it.
+// ───────────────────────────────────────────────────────────────────
+
+const PER_PAGE_FULL_BUDGET = 12_000;
+const DIFF_CONTEXT_LINES = 6;
+const HUNK_HARD_CAP = 32_000;
+
+function buildPageDiffBlock(page: ChangedPage): string {
+  const { before, after, kind } = page;
+  if (kind === 'added' || kind === 'removed') {
+    return `BEFORE:\n${before.slice(0, HUNK_HARD_CAP)}${before.length > HUNK_HARD_CAP ? '\n[… truncated]' : ''}\n\nAFTER:\n${after.slice(0, HUNK_HARD_CAP)}${after.length > HUNK_HARD_CAP ? '\n[… truncated]' : ''}`;
+  }
+  if (before.length + after.length <= PER_PAGE_FULL_BUDGET) {
+    return `BEFORE:\n${before}\n\nAFTER:\n${after}`;
+  }
+  const bLines = before.split('\n');
+  const aLines = after.split('\n');
+  let firstDiff = 0;
+  while (firstDiff < bLines.length && firstDiff < aLines.length && bLines[firstDiff] === aLines[firstDiff]) firstDiff++;
+  let bEnd = bLines.length - 1;
+  let aEnd = aLines.length - 1;
+  while (bEnd >= firstDiff && aEnd >= firstDiff && bLines[bEnd] === aLines[aEnd]) { bEnd--; aEnd--; }
+  const bWindowStart = Math.max(0, firstDiff - DIFF_CONTEXT_LINES);
+  const bWindowEnd = Math.min(bLines.length, bEnd + 1 + DIFF_CONTEXT_LINES);
+  const aWindowStart = Math.max(0, firstDiff - DIFF_CONTEXT_LINES);
+  const aWindowEnd = Math.min(aLines.length, aEnd + 1 + DIFF_CONTEXT_LINES);
+  let bHunk = bLines.slice(bWindowStart, bWindowEnd).join('\n');
+  let aHunk = aLines.slice(aWindowStart, aWindowEnd).join('\n');
+  if (bHunk.length > HUNK_HARD_CAP) bHunk = bHunk.slice(0, HUNK_HARD_CAP) + '\n[… hunk truncated]';
+  if (aHunk.length > HUNK_HARD_CAP) aHunk = aHunk.slice(0, HUNK_HARD_CAP) + '\n[… hunk truncated]';
+  const bPrefix = bWindowStart > 0 ? `[… ${bWindowStart} unchanged lines above]\n` : '';
+  const bSuffix = bWindowEnd < bLines.length ? `\n[… ${bLines.length - bWindowEnd} unchanged lines below]` : '';
+  const aPrefix = aWindowStart > 0 ? `[… ${aWindowStart} unchanged lines above]\n` : '';
+  const aSuffix = aWindowEnd < aLines.length ? `\n[… ${aLines.length - aWindowEnd} unchanged lines below]` : '';
+  return `BEFORE (divergent region, ±${DIFF_CONTEXT_LINES} lines context, lines ${bWindowStart + 1}-${bWindowEnd} of ${bLines.length}):
+${bPrefix}${bHunk}${bSuffix}
+
+AFTER (divergent region, ±${DIFF_CONTEXT_LINES} lines context, lines ${aWindowStart + 1}-${aWindowEnd} of ${aLines.length}):
+${aPrefix}${aHunk}${aSuffix}`;
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Parallel per-page agent orchestrator (Phase A1).
+//
+// When an incremental edit changes ≥2 pages, fire independent Agent
+// SDK query() calls in parallel (capped at MAX_PARALLEL_PAGES) and
+// collect the results. Each sub-agent gets a tightly-scoped prompt
+// with ONLY its page's diff + files hint, and a guardrail that it
+// must NOT touch files outside its scope. All sub-agents share the
+// same cwd so their writes compose naturally.
+//
+// Conflict handling: if two pages' file maps overlap (both claim
+// e.g. package.json), those pages form a "conflict cluster" that
+// runs SERIALLY to avoid clobbering. Non-conflicting pages run in
+// parallel around the serial cluster.
+// ───────────────────────────────────────────────────────────────────
+
+const MAX_PARALLEL_PAGES = 3;
+
+interface PageAgentResult {
+  page: string;
+  iterations: number;
+  duration_ms: number;
+  final_text: string;
+  error?: string;
+}
+
+// Simple promise-pool semaphore: runs up to `max` tasks concurrently.
+async function runWithSemaphore<T>(
+  tasks: Array<() => Promise<T>>,
+  max: number,
+): Promise<T[]> {
+  const results: T[] = new Array(tasks.length);
+  let nextIdx = 0;
+  const worker = async () => {
+    while (true) {
+      const idx = nextIdx++;
+      if (idx >= tasks.length) break;
+      results[idx] = await tasks[idx]();
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(max, tasks.length) }, () => worker()),
+  );
+  return results;
+}
+
+// Detect file conflicts: returns a Set of page paths that share ≥1
+// mapped file with another page. Those pages must run serially.
+function detectConflictPages(
+  diff: ChangedPage[],
+  pageFilesMap: Record<string, string[]> | undefined,
+): { conflictPages: Set<string>; conflictFiles: Map<string, string[]> } {
+  const conflictPages = new Set<string>();
+  const conflictFiles = new Map<string, string[]>();
+  if (!pageFilesMap) return { conflictPages, conflictFiles };
+  // Build file → [pages...] inverse index.
+  const fileToPages = new Map<string, string[]>();
+  const changedPaths = new Set(diff.map((p) => p.path));
+  for (const [pagePath, files] of Object.entries(pageFilesMap)) {
+    if (!changedPaths.has(pagePath)) continue;
+    for (const f of files) {
+      const existing = fileToPages.get(f) || [];
+      existing.push(pagePath);
+      fileToPages.set(f, existing);
+    }
+  }
+  for (const [file, pages] of fileToPages) {
+    if (pages.length > 1) {
+      for (const p of pages) conflictPages.add(p);
+      conflictFiles.set(file, pages);
+    }
+  }
+  return { conflictPages, conflictFiles };
+}
+
 async function runWithClaudeAgentSDK(
   devboxUrl: string,
   specMd: string,
@@ -870,91 +989,6 @@ Do NOT modify any files. Your working directory already contains the correct cod
 BUILD_SUMMARY: no-op, spec page content unchanged.`;
       systemPromptVariant = SYSTEM_PROMPT_MANIDEX_INCREMENTAL;
     } else {
-      // Build a change-focused diff block. For each changed page, if
-      // both full BEFORE and AFTER fit in the soft budget, send them
-      // in full. Otherwise, extract the divergent hunk (first line
-      // that differs through last line that differs, plus ±CONTEXT
-      // lines on each side) and send that. This is the fix for the
-      // "4KB head truncation" bug surfaced by governor: appending to
-      // the end of a long page produced identical head-slice windows
-      // in BEFORE and AFTER, and the agent correctly refused to
-      // hallucinate a change it couldn't see.
-      const PER_PAGE_FULL_BUDGET = 12_000;  // if both sides total < this, send full
-      const CONTEXT_LINES = 6;
-      const HUNK_HARD_CAP = 32_000;         // per-side cap on hunk output, very generous
-
-      const buildPageDiffBlock = (page: ChangedPage): string => {
-        const { before, after, kind } = page;
-        // Added/removed pages: show the full surviving side. For
-        // added, BEFORE is a placeholder anyway; for removed, AFTER is.
-        if (kind === 'added' || kind === 'removed') {
-          return `BEFORE:\n${before.slice(0, HUNK_HARD_CAP)}${before.length > HUNK_HARD_CAP ? '\n[… truncated]' : ''}\n\nAFTER:\n${after.slice(0, HUNK_HARD_CAP)}${after.length > HUNK_HARD_CAP ? '\n[… truncated]' : ''}`;
-        }
-        // Short enough: send both in full.
-        if (before.length + after.length <= PER_PAGE_FULL_BUDGET) {
-          return `BEFORE:\n${before}\n\nAFTER:\n${after}`;
-        }
-        // Hunk extraction: find first line that differs by walking
-        // forward, last line that differs by walking backward from
-        // both ends. This handles appends (first_diff == bLines.len),
-        // prepends (last_diff == first_diff -ish), mid-page edits,
-        // and large-region rewrites. CONTEXT lines on each side give
-        // the agent enough surroundings to locate the change in the
-        // full spec without restating the whole page.
-        const bLines = before.split('\n');
-        const aLines = after.split('\n');
-        let firstDiff = 0;
-        while (
-          firstDiff < bLines.length &&
-          firstDiff < aLines.length &&
-          bLines[firstDiff] === aLines[firstDiff]
-        ) {
-          firstDiff++;
-        }
-        let bEnd = bLines.length - 1;
-        let aEnd = aLines.length - 1;
-        while (
-          bEnd >= firstDiff &&
-          aEnd >= firstDiff &&
-          bLines[bEnd] === aLines[aEnd]
-        ) {
-          bEnd--;
-          aEnd--;
-        }
-        // bEnd/aEnd now point at the LAST divergent line on each side
-        // (or firstDiff - 1 if the other side ran out).
-        const bWindowStart = Math.max(0, firstDiff - CONTEXT_LINES);
-        const bWindowEnd = Math.min(bLines.length, bEnd + 1 + CONTEXT_LINES);
-        const aWindowStart = Math.max(0, firstDiff - CONTEXT_LINES);
-        const aWindowEnd = Math.min(aLines.length, aEnd + 1 + CONTEXT_LINES);
-
-        const bHunkLines = bLines.slice(bWindowStart, bWindowEnd);
-        const aHunkLines = aLines.slice(aWindowStart, aWindowEnd);
-        let bHunk = bHunkLines.join('\n');
-        let aHunk = aHunkLines.join('\n');
-        // Per-side hard cap. Very generous (32KB); only fires on
-        // pathological whole-page rewrites. Truncates from the END
-        // of the hunk because the divergence is at the start of the
-        // hunk by construction.
-        if (bHunk.length > HUNK_HARD_CAP) {
-          bHunk = bHunk.slice(0, HUNK_HARD_CAP) + '\n[… hunk truncated]';
-        }
-        if (aHunk.length > HUNK_HARD_CAP) {
-          aHunk = aHunk.slice(0, HUNK_HARD_CAP) + '\n[… hunk truncated]';
-        }
-
-        const bPrefix = bWindowStart > 0 ? `[… ${bWindowStart} unchanged lines above]\n` : '';
-        const bSuffix = bWindowEnd < bLines.length ? `\n[… ${bLines.length - bWindowEnd} unchanged lines below]` : '';
-        const aPrefix = aWindowStart > 0 ? `[… ${aWindowStart} unchanged lines above]\n` : '';
-        const aSuffix = aWindowEnd < aLines.length ? `\n[… ${aLines.length - aWindowEnd} unchanged lines below]` : '';
-
-        return `BEFORE (divergent region, ±${CONTEXT_LINES} lines context, lines ${bWindowStart + 1}-${bWindowEnd} of ${bLines.length}):
-${bPrefix}${bHunk}${bSuffix}
-
-AFTER (divergent region, ±${CONTEXT_LINES} lines context, lines ${aWindowStart + 1}-${aWindowEnd} of ${aLines.length}):
-${aPrefix}${aHunk}${aSuffix}`;
-      };
-
       const diffBlocks = diff.map((p) => `## ${p.path} — ${p.title} (${p.kind})
 
 ${buildPageDiffBlock(p)}`).join('\n\n---\n\n');
@@ -1007,95 +1041,278 @@ ${specMd}
     systemPromptVariant = SYSTEM_PROMPT_MANIDEX;
   }
 
+  // ─── Helper: run a single agent query and stream events ───
+  // Used by both the serial path (N≤1 or cold) and the parallel
+  // orchestrator (N≥2 incremental). Returns per-call metrics.
+  async function runSingleAgent(
+    prompt: string,
+    sysPrompt: string,
+    agentEmit: BuildAgentEmit,
+    abortSignal?: AbortSignal,
+  ): Promise<PageAgentResult & { page: string }> {
+    const pageStart = Date.now();
+    let iter = 0;
+    let text = '';
+    const controller = new AbortController();
+    // If an external signal fires, abort our controller too.
+    if (abortSignal) {
+      abortSignal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    const q = query({
+      prompt,
+      options: {
+        systemPrompt: sysPrompt,
+        cwd,
+        allowedTools: ['Read', 'Write', 'Edit', 'Glob', 'Grep'],
+        env: childEnv,
+        abortController: controller,
+      },
+    });
+    try {
+      for await (const msg of q) {
+        if (abortSignal?.aborted) break;
+        if (msg.type === 'assistant') {
+          iter++;
+          agentEmit('iteration', { n: iter });
+          const content = (msg as { message?: { content?: unknown[] } }).message?.content || [];
+          for (const block of content as Array<Record<string, unknown>>) {
+            if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+              agentEmit('assistant_text', { iteration: iter, text: block.text });
+              text = block.text;
+            } else if (block.type === 'tool_use') {
+              agentEmit('tool_use', {
+                id: String(block.id || ''),
+                iteration: iter,
+                name: typeof block.name === 'string' ? block.name : 'unknown',
+                input: block.input,
+              });
+            }
+          }
+        } else if (msg.type === 'user') {
+          const content = (msg as { message?: { content?: unknown[] } }).message?.content || [];
+          for (const block of content as Array<Record<string, unknown>>) {
+            if (block.type === 'tool_result') {
+              const isErr = Boolean(block.is_error);
+              let summary = '';
+              const inner = block.content;
+              if (Array.isArray(inner)) {
+                for (const part of inner as Array<Record<string, unknown>>) {
+                  if (part.type === 'text' && typeof part.text === 'string') {
+                    summary = part.text.split('\n')[0].slice(0, 160);
+                    break;
+                  }
+                }
+              } else if (typeof inner === 'string') {
+                summary = inner.split('\n')[0].slice(0, 160);
+              }
+              agentEmit('tool_result', {
+                id: String(block.tool_use_id || ''),
+                iteration: iter,
+                ok: !isErr,
+                summary,
+              });
+            }
+          }
+        } else if (msg.type === 'result') {
+          const r = msg as { subtype?: string; num_turns?: number };
+          if (r.subtype && r.subtype !== 'success') {
+            agentEmit('error', { message: `agent result subtype=${r.subtype}`, stage: 'loop' });
+          }
+          if (typeof r.num_turns === 'number' && r.num_turns > iter) iter = r.num_turns;
+        } else if (msg.type === 'system') {
+          const subtype = (msg as { subtype?: string }).subtype;
+          if (subtype === 'init') {
+            const init = msg as { apiProvider?: string; apiKeySource?: string; tokenSource?: string; model?: string };
+            agentEmit('backend_init', {
+              provider: init.apiProvider,
+              apiKeySource: init.apiKeySource,
+              tokenSource: init.tokenSource,
+              model: init.model,
+            });
+          }
+        }
+      }
+    } finally {
+      try { q.close(); } catch {}
+    }
+    return { page: '', iterations: iter, duration_ms: Date.now() - pageStart, final_text: text };
+  }
+
   const started = Date.now();
+
+  // ─── Parallel path: ≥2 changed pages in incremental mode ───
+  if (incremental && changedPagesForEmit.length >= 2) {
+    const { conflictPages, conflictFiles } = detectConflictPages(
+      changedPagesForEmit,
+      opts.previousPageFilesMap,
+    );
+    // Log conflicts.
+    for (const [file, pages] of conflictFiles) {
+      emit('parallel_conflict', { file, pages });
+      console.warn(`[manidex:parallel] conflict on ${file} claimed by pages: ${pages.join(', ')}`);
+    }
+
+    // Split into parallel (non-conflict) and serial (conflict cluster).
+    const parallelPages = changedPagesForEmit.filter((p) => !conflictPages.has(p.path));
+    const serialPages = changedPagesForEmit.filter((p) => conflictPages.has(p.path));
+
+    emit('parallel_start', {
+      pages: changedPagesForEmit.map((p) => p.path),
+      parallel_count: parallelPages.length,
+      serial_count: serialPages.length,
+      conflict_files: Array.from(conflictFiles.keys()),
+      max_concurrent: MAX_PARALLEL_PAGES,
+    });
+
+    // Build per-page prompts. Each sub-agent sees ONLY its page's diff
+    // + its page's files hint, with a guardrail against touching other
+    // pages' files.
+    const buildPagePrompt = (page: ChangedPage): string => {
+      const filesForPage = opts.previousPageFilesMap?.[page.path] || [];
+      const filesHint = filesForPage.length > 0
+        ? `\nFILES FOR THIS PAGE (from previous compilation — read these directly):\n${filesForPage.map((f) => `  - ${f}`).join('\n')}\n`
+        : '';
+      const diffBlock = `## ${page.path} — ${page.title} (${page.kind})\n\n${buildPageDiffBlock(page)}`;
+      return `You are editing the existing Manifex codebase for ONE spec page only: "${page.title}" (${page.path}).
+${filesHint}
+${diffBlock}
+
+Your scope is ONLY the files listed above (or files directly related to this page if no map was provided). Do NOT touch files that belong to other pages. Do NOT edit package.json, setup.sh, run.sh, or any shared config unless the diff explicitly requires it.
+
+Read the relevant files, apply the minimal edit, finish with "BUILD_SUMMARY: <one sentence about this page's change>".`;
+    };
+
+    const overallAbort = new AbortController();
+    const perPageDurations: Record<string, number> = {};
+    let totalIterations = 0;
+    const summaries: string[] = [];
+    let hadError = false;
+
+    // Run a single page task (used by both parallel and serial paths).
+    const runPageTask = async (page: ChangedPage): Promise<void> => {
+      if (hadError) return;
+      const pageEmit: BuildAgentEmit = (event, data) =>
+        emit(event, { ...(typeof data === 'object' && data !== null ? data : {}), page: page.path });
+      const prompt = buildPagePrompt(page);
+      try {
+        const result = await runSingleAgent(
+          prompt,
+          SYSTEM_PROMPT_MANIDEX_INCREMENTAL,
+          pageEmit,
+          overallAbort.signal,
+        );
+        result.page = page.path;
+        perPageDurations[page.path] = result.duration_ms;
+        totalIterations += result.iterations;
+        if (result.final_text) summaries.push(`[${page.path}] ${result.final_text}`);
+        pageEmit('page_done', { iterations: result.iterations, duration_ms: result.duration_ms });
+      } catch (e: unknown) {
+        hadError = true;
+        overallAbort.abort();
+        const msg = e instanceof Error ? e.message : String(e);
+        emit('parallel_error', { page: page.path, error: msg });
+        throw e;
+      }
+    };
+
+    // Run parallel pages via semaphore, then serial conflict cluster.
+    try {
+      if (parallelPages.length > 0) {
+        await runWithSemaphore(
+          parallelPages.map((page) => () => runPageTask(page)),
+          MAX_PARALLEL_PAGES,
+        );
+      }
+      // Serial conflict cluster runs AFTER parallel pages finish.
+      for (const page of serialPages) {
+        await runPageTask(page);
+      }
+    } catch (e: unknown) {
+      // runPageTask sets hadError + aborts siblings. Bubble up the first
+      // error to the caller so the route can emit('error') and skip upsert.
+      const msg = e instanceof Error ? e.message : String(e);
+      emit('error', { message: `parallel build failed: ${msg}`, stage: 'parallel' });
+      // Still need to read the map + walk for partial results (don't
+      // return early — fall through to the post-loop section).
+    }
+
+    const maxDuration = Math.max(...Object.values(perPageDurations), 0);
+    const sumDuration = Object.values(perPageDurations).reduce((a, b) => a + b, 0);
+    const finalText = summaries.join(' | ') || '(no summaries)';
+    const wallClockMs = Date.now() - started;
+
+    emit('parallel_done', {
+      parallel: true,
+      per_page_durations: perPageDurations,
+      max_page_duration_ms: maxDuration,
+      sum_page_duration_ms: sumDuration,
+      wall_clock_ms: wallClockMs,
+      total_iterations: totalIterations,
+      had_error: hadError,
+    });
+
+    // ─── Post-loop: read map, walk, compute metrics ───
+    // (shared with the serial path below via the same variable names)
+    let pageFilesMap: Record<string, string[]> | undefined;
+    try {
+      const mapPath = `${cwd}/.manidex/page-files-map.json`;
+      const mapRaw = await fs.readFile(mapPath, 'utf-8');
+      const parsed = JSON.parse(mapRaw);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        pageFilesMap = parsed as Record<string, string[]>;
+      }
+    } catch {}
+
+    const { files: codexFiles, totalBytes, elided } = await walkAndSerialize(cwd);
+    if (elided.length > 0) {
+      console.warn(`[manidex] ${elided.length} oversized files elided`);
+    }
+    try { await fs.rm(cwd, { recursive: true, force: true }); } catch {}
+
+    // Diff metrics.
+    const totalFiles = Object.keys(codexFiles).filter(
+      (k) => !k.startsWith(MANIDEX_META_KEY_PREFIX),
+    ).length;
+    let modifiedFiles: number | undefined;
+    let preservedFiles: number | undefined;
+    if (opts.previousCodexFiles) {
+      const prev = opts.previousCodexFiles;
+      let modified = 0;
+      let preserved = 0;
+      for (const [relPath, content] of Object.entries(codexFiles)) {
+        if (relPath.startsWith(MANIDEX_META_KEY_PREFIX)) continue;
+        if (typeof prev[relPath] !== 'string' || prev[relPath] !== content) modified++;
+        else preserved++;
+      }
+      modifiedFiles = modified;
+      preservedFiles = preserved;
+    }
+
+    return {
+      iterations: totalIterations,
+      final_text: finalText,
+      duration_ms: wallClockMs,
+      codex_files: codexFiles,
+      total_bytes: totalBytes,
+      modified_files: modifiedFiles,
+      preserved_files: preservedFiles,
+      total_files: totalFiles,
+      incremental: true,
+      page_files_map: pageFilesMap,
+    };
+  }
+
+  // ─── Serial path: N≤1 changed pages OR cold scaffold ───
   let iteration = 0;
   let finalText = '';
 
-  const q = query({
-    prompt: userPrompt,
-    options: {
-      systemPrompt: systemPromptVariant,
-      cwd,
-      allowedTools: ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep'],
-      env: childEnv,
-    },
-  });
-
-  try {
-    for await (const msg of q) {
-      if (msg.type === 'assistant') {
-        iteration++;
-        emit('iteration', { n: iteration });
-        const content = (msg as { message?: { content?: unknown[] } }).message?.content || [];
-        for (const block of content as Array<Record<string, unknown>>) {
-          if (block.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
-            emit('assistant_text', { iteration, text: block.text });
-            finalText = block.text;
-          } else if (block.type === 'tool_use') {
-            const rawName = typeof block.name === 'string' ? block.name : 'unknown';
-            emit('tool_use', {
-              id: String(block.id || ''),
-              iteration,
-              name: rawName,
-              input: block.input,
-            });
-          }
-        }
-      } else if (msg.type === 'user') {
-        // user messages carry tool_result blocks from the built-in tools.
-        const content = (msg as { message?: { content?: unknown[] } }).message?.content || [];
-        for (const block of content as Array<Record<string, unknown>>) {
-          if (block.type === 'tool_result') {
-            const isErr = Boolean(block.is_error);
-            // Extract first text block's content for the summary.
-            let summary = '';
-            const inner = block.content;
-            if (Array.isArray(inner)) {
-              for (const part of inner as Array<Record<string, unknown>>) {
-                if (part.type === 'text' && typeof part.text === 'string') {
-                  summary = part.text.split('\n')[0].slice(0, 160);
-                  break;
-                }
-              }
-            } else if (typeof inner === 'string') {
-              summary = inner.split('\n')[0].slice(0, 160);
-            }
-            emit('tool_result', {
-              id: String(block.tool_use_id || ''),
-              iteration,
-              ok: !isErr,
-              summary,
-            });
-          }
-        }
-      } else if (msg.type === 'result') {
-        // Final message — SDK reports usage + cost + subtype.
-        const r = msg as { subtype?: string; num_turns?: number; total_cost_usd?: number; usage?: unknown };
-        if (r.subtype && r.subtype !== 'success') {
-          emit('error', { message: `claude-agent-sdk result subtype=${r.subtype}`, stage: 'loop' });
-        }
-        // Prefer the SDK's reported turn count when available.
-        if (typeof r.num_turns === 'number' && r.num_turns > iteration) {
-          iteration = r.num_turns;
-        }
-      } else if (msg.type === 'system') {
-        // init / api_retry / etc. — emit for observability but don't
-        // gate the loop on them.
-        const subtype = (msg as { subtype?: string }).subtype;
-        if (subtype === 'init') {
-          const init = msg as { apiProvider?: string; apiKeySource?: string; tokenSource?: string; model?: string };
-          emit('backend_init', {
-            provider: init.apiProvider,
-            apiKeySource: init.apiKeySource,
-            tokenSource: init.tokenSource,
-            model: init.model,
-          });
-        }
-      }
-    }
-  } finally {
-    try { q.close(); } catch {}
-  }
+  const serialResult = await runSingleAgent(
+    userPrompt,
+    systemPromptVariant,
+    emit,
+  );
+  iteration = serialResult.iterations;
+  finalText = serialResult.final_text;
 
   // Read the page→files map BEFORE walking (the .manidex/ dir is in
   // CODEX_ALWAYS_SKIP_DIRS so walkAndSerialize won't pick it up). Parse

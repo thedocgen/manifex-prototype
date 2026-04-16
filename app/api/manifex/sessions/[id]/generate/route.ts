@@ -4,7 +4,7 @@ import { runBuildAgent, isClaudeAgentSdkBackend } from '@/lib/llm-backend';
 import { parseEnvironmentServices } from '@/lib/manifest-services';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
-const MANIDEX_COMPILER_VERSION = 'manidex-claude-agent-sdk-v2';
+const MANIDEX_COMPILER_VERSION = 'manidex-claude-agent-sdk-v3';
 
 // Magic key inside codex_files that stores the session
 // manifest_state.pages snapshot for incremental diffs. Keys with
@@ -329,10 +329,15 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
           let previousPages: Record<string, { title: string; content: string }> | undefined;
           let previousPageFilesMap: Record<string, string[]> | undefined;
           try {
+            // Accept ANY manidex-claude-agent-sdk-* version as a
+            // baseline for incremental builds — the codex_files are
+            // source code that's compatible across compiler versions.
+            // Only the CACHE check (above) needs exact version matching
+            // to avoid serving a stale-version row as the current result.
             const { data: prevRows, error: prevErr } = await supabaseAdmin()
               .from('manifex_compilations')
               .select('manifest_sha,compiler_version,created_at,codex_files')
-              .eq('compiler_version', MANIDEX_COMPILER_VERSION)
+              .like('compiler_version', 'manidex-claude-agent-sdk-%')
               .neq('manifest_sha', manifest_sha)
               .order('created_at', { ascending: false })
               .limit(1);
