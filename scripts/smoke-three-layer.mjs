@@ -15,7 +15,7 @@ import { join } from 'node:path';
 const MANIDEX_URL = process.env.MANIDEX_URL || 'http://localhost:37459';
 const HEADED = process.argv.includes('--headed');
 const SCREENSHOT_DIR = '/tmp/governor/projects/manifex/screenshots';
-const BUILD_TIMEOUT_MS = 5 * 60 * 1000; // 5 min for Layer 0 build
+const BUILD_TIMEOUT_MS = 10 * 60 * 1000; // 10 min for Layer 0 build (cold Claude codegen is 7-10 min)
 const NAV_TIMEOUT_MS = 60 * 1000;       // 60s for page loads / compile
 
 if (!existsSync(SCREENSHOT_DIR)) mkdirSync(SCREENSHOT_DIR, { recursive: true });
