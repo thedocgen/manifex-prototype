@@ -302,6 +302,10 @@ export interface BuildAgentResult {
   // The route injects this as a magic key into codex_files before upsert
   // so the NEXT incremental run can use it as a hint.
   page_files_map?: Record<string, string[]>;
+  // A2 composite cache key hashes — computed BEFORE the agent loop runs
+  // and returned so the route can include them in the upsert + SSE events.
+  seeded_codex_hash?: string | null;
+  prompt_version_hash?: string;
 }
 
 // Page-level snapshot used for diff computation in the incremental
@@ -617,6 +621,55 @@ Be efficient. Your output is the filesystem state when BUILD_SUMMARY fires. Ever
 const MANIDEX_META_KEY_PREFIX = '__manidex_';
 const MANIDEX_STATE_SNAPSHOT_KEY = '__manidex_state_snapshot__';
 const MANIDEX_PAGE_FILES_MAP_KEY = '__manidex_page_files_map__';
+
+// ── A2: composite cache key hash helpers ──
+// Deterministic SHA-256 of a JSON-serializable value. Keys are sorted
+// at every nesting level so the hash is stable across Node versions
+// and across insertion-order differences in the source objects.
+import { createHash } from 'node:crypto';
+
+function deterministicStringify(value: unknown): string {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return '[' + value.map(deterministicStringify).join(',') + ']';
+  if (typeof value === 'object') {
+    const sorted = Object.keys(value as Record<string, unknown>).sort();
+    return '{' + sorted.map(k => JSON.stringify(k) + ':' + deterministicStringify((value as Record<string, unknown>)[k])).join(',') + '}';
+  }
+  return String(value);
+}
+
+function sha256(input: string): string {
+  return createHash('sha256').update(input, 'utf-8').digest('hex');
+}
+
+/** Compute seeded_codex_hash from the previousCodexFiles map (or null for cold gen). */
+export function computeSeededCodexHash(previousCodexFiles: Record<string, string> | undefined): string | null {
+  if (!previousCodexFiles) return null;
+  // Filter out magic keys — they're metadata, not part of the source identity.
+  const sourceOnly: Record<string, string> = {};
+  for (const [k, v] of Object.entries(previousCodexFiles)) {
+    if (k.startsWith(MANIDEX_META_KEY_PREFIX)) continue;
+    sourceOnly[k] = v;
+  }
+  if (Object.keys(sourceOnly).length === 0) return null;
+  return sha256(deterministicStringify(sourceOnly));
+}
+
+/** Compute prompt_version_hash from system prompt + routes + map. */
+export function computePromptVersionHash(
+  systemPrompt: string,
+  requiredRoutes: Array<{ path: string; description: string }>,
+  pageFilesMap: Record<string, string[]> | undefined,
+): string {
+  const input = deterministicStringify({
+    systemPrompt,
+    requiredRoutes,
+    pageFilesMap: pageFilesMap || {},
+  });
+  return sha256(input);
+}
 
 // Directories to skip when serializing the temp dir into
 // manifex_compilations.codex_files. Split into two tiers:
@@ -1041,6 +1094,30 @@ ${specMd}
     systemPromptVariant = SYSTEM_PROMPT_MANIDEX;
   }
 
+  // ─── A2: compute composite cache key hashes before the loop ───
+  // Use a short label ('INCREMENTAL' or 'COLD') instead of the full
+  // multi-KB system prompt text, so the hash is stable across minor
+  // prompt-wording edits and matches what the route computes.
+  //
+  // IMPORTANT: for the prompt hash, parse REQUIRED ROUTES from ALL
+  // current pages (not just changed pages). The route computes the
+  // hash from all pages too, and the two must match for the cache
+  // probe to HIT on the upserted row. The actual prompt only
+  // surfaces routes from changed pages, but the HASH reflects the
+  // full routes state so it's deterministic regardless of which
+  // pages happen to change.
+  const allPagesRoutes = opts.currentPages
+    ? (await import('./manifest-services')).parseRequiredRoutesFromPages(
+        opts.currentPages as Record<string, { content: string }>,
+      ).routes
+    : requiredRoutes;
+  const seededCodexHash = computeSeededCodexHash(opts.previousCodexFiles);
+  const promptVersionHash = computePromptVersionHash(
+    incremental ? 'INCREMENTAL' : 'COLD',
+    allPagesRoutes,
+    opts.previousPageFilesMap,
+  );
+
   // ─── Helper: run a single agent query and stream events ───
   // Used by both the serial path (N≤1 or cold) and the parallel
   // orchestrator (N≥2 incremental). Returns per-call metrics.
@@ -1299,6 +1376,8 @@ Read the relevant files, apply the minimal edit, finish with "BUILD_SUMMARY: <on
       total_files: totalFiles,
       incremental: true,
       page_files_map: pageFilesMap,
+      seeded_codex_hash: seededCodexHash,
+      prompt_version_hash: promptVersionHash,
     };
   }
 
@@ -1383,6 +1462,8 @@ Read the relevant files, apply the minimal edit, finish with "BUILD_SUMMARY: <on
     total_files: totalFiles,
     incremental,
     page_files_map: pageFilesMap,
+    seeded_codex_hash: seededCodexHash,
+    prompt_version_hash: promptVersionHash,
   };
 }
 

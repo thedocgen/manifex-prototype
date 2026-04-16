@@ -1,6 +1,6 @@
 import { getSession, getSecrets, updateSession } from '@/lib/store';
 import type { ManifexSession, ManifestState } from '@/lib/types';
-import { runBuildAgent, isClaudeAgentSdkBackend } from '@/lib/llm-backend';
+import { runBuildAgent, isClaudeAgentSdkBackend, computeSeededCodexHash, computePromptVersionHash } from '@/lib/llm-backend';
 import { parseEnvironmentServices } from '@/lib/manifest-services';
 import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
@@ -259,81 +259,14 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
         };
 
         try {
-          // Probe for an existing compilation row BEFORE emitting start
-          // — we want the start event to correctly advertise cache_hit
-          // so the editor build-log overlay doesn't show a misleading
-          // "generating…" spinner when we're about to hit cache.
-          const { data: existing, error: cacheLookupErr } = await supabaseAdmin()
-            .from('manifex_compilations')
-            .select('manifest_sha,compiler_version,created_at,codex_files')
-            .eq('manifest_sha', manifest_sha)
-            .eq('compiler_version', MANIDEX_COMPILER_VERSION)
-            .maybeSingle();
-          if (cacheLookupErr) {
-            console.warn(`[generate:manidex] cache lookup failed, proceeding with fresh build: ${cacheLookupErr.message}`);
-          }
-
-          if (existing?.codex_files) {
-            const files = (existing.codex_files as Record<string, unknown>) || {};
-            const fileCount = Object.keys(files).length;
-            const totalBytes = Object.values(files).reduce<number>(
-              (a, v) => a + (typeof v === 'string' ? v.length : 0),
-              0,
-            );
-            const ageMs = Date.now() - new Date(existing.created_at as string).getTime();
-            emit('start', {
-              manifest_sha,
-              backend: 'claude-agent-sdk',
-              spec_bytes: spec_md.length,
-              cache_hit: true,
-            });
-            emit('cache_hit', {
-              manifest_sha,
-              compiler_version: MANIDEX_COMPILER_VERSION,
-              file_count: fileCount,
-              total_bytes: totalBytes,
-              at: existing.created_at,
-              age_ms: ageMs,
-            });
-            emit('done', {
-              backend: 'claude-agent-sdk',
-              iterations: 0,
-              duration_ms: 0,
-              final_text: `Cache hit from ${Math.round(ageMs / 60000)} minute${Math.round(ageMs / 60000) === 1 ? '' : 's'} ago — ${fileCount} files, ${totalBytes} bytes. Spec unchanged since last build.`,
-              file_count: fileCount,
-              total_bytes: totalBytes,
-              manifest_sha,
-              compiler_version: MANIDEX_COMPILER_VERSION,
-              cache_hit: true,
-              cached_at: existing.created_at,
-              cache_age_ms: ageMs,
-            });
-            return;
-          }
-
-          // Cache miss — look up the PREVIOUS compilation (most
-          // recent row at this compiler_version with a different
-          // manifest_sha). If found AND it contains the snapshot
-          // magic key, pass both to runBuildAgent so the Manidex
-          // path pre-seeds the cwd and frames the agent loop as a
-          // surgical edit instead of a cold scaffold.
-          //
-          // Why "most recent different sha" and not "session.history
-          // last": the compilations table is append-only (cache hits
-          // on same sha, upserts only on new shas), so walking back
-          // to the most recent != current row gives a stable
-          // baseline across repeated invocations. session.history
-          // can compact or be edited by other paths and isn't a
-          // reliable source for determinism.
+          // ─── A2: previous-compilation lookup + composite hash computation ───
+          // Must happen BEFORE the cache probe so we can include seeded_codex_hash
+          // and prompt_version_hash in the extended cache key. The previous row
+          // is also needed by the incremental path on cache miss.
           let previousCodexFiles: Record<string, string> | undefined;
           let previousPages: Record<string, { title: string; content: string }> | undefined;
           let previousPageFilesMap: Record<string, string[]> | undefined;
           try {
-            // Accept ANY manidex-claude-agent-sdk-* version as a
-            // baseline for incremental builds — the codex_files are
-            // source code that's compatible across compiler versions.
-            // Only the CACHE check (above) needs exact version matching
-            // to avoid serving a stale-version row as the current result.
             const { data: prevRows, error: prevErr } = await supabaseAdmin()
               .from('manifex_compilations')
               .select('manifest_sha,compiler_version,created_at,codex_files')
@@ -345,9 +278,6 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
               console.warn(`[generate:manidex] previous-compilation lookup failed: ${prevErr.message}`);
             } else if (prevRows && prevRows[0]?.codex_files) {
               const prevFiles = prevRows[0].codex_files as Record<string, unknown>;
-              // Strip the snapshot magic key out of what we'll seed
-              // into the cwd — it's metadata, not a real file. Parse
-              // the snapshot content as ManidexPagesSnapshot for diff.
               const snapshotRaw = prevFiles[MANIDEX_STATE_SNAPSHOT_KEY];
               const seededFiles: Record<string, string> = {};
               for (const [k, v] of Object.entries(prevFiles)) {
@@ -355,18 +285,14 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
                 if (typeof v === 'string') seededFiles[k] = v;
               }
               previousCodexFiles = seededFiles;
-              // Extract page→files map if present (improvement B).
               const mapRaw = prevFiles[MANIDEX_PAGE_FILES_MAP_KEY];
               if (typeof mapRaw === 'string') {
                 try {
                   const mapParsed = JSON.parse(mapRaw);
                   if (mapParsed && typeof mapParsed === 'object') {
                     previousPageFilesMap = mapParsed as Record<string, string[]>;
-                    console.log(`[generate:manidex] loaded page→files map: ${Object.keys(mapParsed).length} pages mapped`);
                   }
-                } catch (e: any) {
-                  console.warn(`[generate:manidex] page-files-map parse failed: ${e?.message || e}`);
-                }
+                } catch {}
               }
               if (typeof snapshotRaw === 'string') {
                 try {
@@ -390,13 +316,95 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
             console.warn(`[generate:manidex] previous-compilation path errored, falling back to cold gen: ${e?.message || e}`);
           }
 
-          const incrementalWillFire = !!(previousCodexFiles && previousPages);
+          // ─── A2: compute composite cache key hashes ───
+          // These mirror what runWithClaudeAgentSDK will compute internally.
+          // We need them here so the cache probe can match on all 4 fields.
+          // Import is already at top of file.
+          const { parseRequiredRoutesFromPages } = await import('@/lib/manifest-services');
+          const currentPages = session.manifest_state.pages as Record<string, { title: string; content: string }>;
+          const routesForHash = parseRequiredRoutesFromPages(currentPages).routes;
+          const seededHash = computeSeededCodexHash(previousCodexFiles);
+          // For the prompt hash, we need to know WHICH system prompt variant
+          // will be used. Incremental fires when both previous + pages exist;
+          // otherwise cold. This matches shouldRunIncremental in lib/llm-backend.ts.
+          const willBeIncremental = !!(previousCodexFiles && previousPages);
+          // The actual prompt hash is computed inside runWithClaudeAgentSDK and
+          // returned in the result — but we need it HERE for the cache probe.
+          // We replicate the computation with the same inputs so the hashes match.
+          // (The alternative — querying without hashes and filtering post-query —
+          // would miss the index and scan the full table.)
+          const promptHash = computePromptVersionHash(
+            willBeIncremental ? 'INCREMENTAL' : 'COLD',
+            routesForHash,
+            previousPageFilesMap,
+          );
+          console.log(`[generate:manidex] A2 hashes: seeded=${seededHash?.slice(0, 12) || 'null'} prompt=${promptHash.slice(0, 12)} incremental=${willBeIncremental}`);
+
+          // ─── A2: cache probe with composite key ───
+          let cacheQuery = supabaseAdmin()
+            .from('manifex_compilations')
+            .select('manifest_sha,compiler_version,created_at,codex_files,seeded_codex_hash,prompt_version_hash')
+            .eq('manifest_sha', manifest_sha)
+            .eq('compiler_version', MANIDEX_COMPILER_VERSION)
+            .eq('prompt_version_hash', promptHash);
+          if (seededHash === null) {
+            cacheQuery = cacheQuery.is('seeded_codex_hash', null);
+          } else {
+            cacheQuery = cacheQuery.eq('seeded_codex_hash', seededHash);
+          }
+          const { data: existing, error: cacheLookupErr } = await cacheQuery.maybeSingle();
+          if (cacheLookupErr) {
+            console.warn(`[generate:manidex] cache lookup failed: ${cacheLookupErr.message}`);
+          }
+
+          if (existing?.codex_files) {
+            const files = (existing.codex_files as Record<string, unknown>) || {};
+            const fileCount = Object.keys(files).filter(k => !String(k).startsWith('__manidex_')).length;
+            const totalBytes = Object.values(files).reduce<number>(
+              (a, v) => a + (typeof v === 'string' ? v.length : 0), 0,
+            );
+            const ageMs = Date.now() - new Date(existing.created_at as string).getTime();
+            emit('start', {
+              manifest_sha,
+              backend: 'claude-agent-sdk',
+              spec_bytes: spec_md.length,
+              cache_hit: true,
+              seeded_codex_hash: seededHash,
+              prompt_version_hash: promptHash,
+            });
+            emit('cache_hit', {
+              manifest_sha,
+              compiler_version: MANIDEX_COMPILER_VERSION,
+              file_count: fileCount,
+              total_bytes: totalBytes,
+              at: existing.created_at,
+              age_ms: ageMs,
+            });
+            emit('done', {
+              backend: 'claude-agent-sdk',
+              iterations: 0,
+              duration_ms: 0,
+              final_text: `Cache hit from ${Math.round(ageMs / 60000)} minute${Math.round(ageMs / 60000) === 1 ? '' : 's'} ago — ${fileCount} files, ${totalBytes} bytes.`,
+              file_count: fileCount,
+              total_bytes: totalBytes,
+              manifest_sha,
+              compiler_version: MANIDEX_COMPILER_VERSION,
+              cache_hit: true,
+              cached_at: existing.created_at,
+              cache_age_ms: ageMs,
+            });
+            return;
+          }
+
+          // ─── Cache miss — run agent ───
           emit('start', {
             manifest_sha,
             backend: 'claude-agent-sdk',
             spec_bytes: spec_md.length,
             cache_hit: false,
-            incremental: incrementalWillFire,
+            incremental: willBeIncremental,
+            seeded_codex_hash: seededHash,
+            prompt_version_hash: promptHash,
           });
           const result = await runBuildAgent(
             '',
@@ -450,6 +458,11 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
                 manifest_sha,
                 compiler_version: MANIDEX_COMPILER_VERSION,
                 codex_files: filesWithSnapshot,
+                // A2: composite cache key hashes — either from the
+                // agent's own computation (returned in result) or
+                // from our pre-computed values above (should match).
+                seeded_codex_hash: result.seeded_codex_hash ?? seededHash,
+                prompt_version_hash: result.prompt_version_hash ?? promptHash,
               },
               { onConflict: 'manifest_sha,compiler_version' },
             );
