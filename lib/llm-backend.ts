@@ -1549,7 +1549,25 @@ Style:
 - Lists beat walls of prose when describing pages, steps, or tests.
 - Keep each page under ~15KB unless the page is explicitly architecture-heavy.
 
-You are NOT running the agent or building any code — you are only editing markdown. No setup.sh, no run.sh, no package.json in this directory. Those are /generate's concern, not /prompt's.`;
+You are NOT running the agent or building any code — you are only editing markdown. No setup.sh, no run.sh, no package.json in this directory. Those are /generate's concern, not /prompt's.
+
+Environment page format:
+- When the app declares external services (databases, email providers, OAuth providers, etc.), environment.md MUST include a '### Services' subsection with the exact shape below. This format is load-bearing — the /devbox vault-gate parser (lib/manifest-services.ts) keys on it to discover which secrets a session needs before provisioning infrastructure. Any other heading (e.g. '## Required', '### Environment Variables', '## Dependencies') is silently bypassed and the vault gate fails open.
+- Each service is a top-level bulleted item starting with '- **<Service Name>** — <one-line description>'. Each service bullet contains a 'Secrets:' label on its own line, followed by nested bullets naming each required secret in the form '- KEY_NAME — <description>' where KEY_NAME is uppercase ASCII + digits + underscores, minimum 3 characters, and the em-dash '—' (U+2014) separates key from description.
+- If the app needs NO external services (pure static SPA, no backend, no auth), omit the '### Services' subsection entirely and say so explicitly: 'This app declares no external services.'
+- Example:
+
+### Services
+
+- **PostgreSQL Database** — Primary store for application data.
+  Secrets:
+  - DATABASE_URL — Postgres connection string (postgresql://user:password@host:5432/dbname)
+
+- **SendGrid** — Transactional email provider for contact form notifications.
+  Secrets:
+  - SENDGRID_API_KEY — SendGrid API key (server-side only)
+  - CONTACT_EMAIL_FROM — Verified sender address
+  - CONTACT_EMAIL_TO — Recipient inbox`;
 
 export async function runDocGenerationLoop(
   sessionId: string,
