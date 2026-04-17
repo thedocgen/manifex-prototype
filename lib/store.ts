@@ -24,10 +24,21 @@ function client(): SupabaseClient {
 
 // ── Starter content ──
 
-export const STARTER_PAGES: { [path: string]: DocPage } = {
-  overview: {
-    title: 'Overview',
-    content: `# New Project
+// Canonical 7-page spec shape. Must stay in sync with DEFAULT_SPEC_TREE in
+// lib/llm-backend.ts — the claude-agent-sdk backend seeds the cwd from this
+// tree and reads back the same paths, so starter sessions must pre-declare
+// all 7 slots or the agent's writes to the other 6 are discarded.
+export const STARTER_TREE: TreeNode[] = [
+  { path: 'overview', title: 'Overview' },
+  { path: 'environment', title: 'Environment' },
+  { path: 'how-it-works', title: 'How It Works' },
+  { path: 'pages-and-layout', title: 'Pages and Layout' },
+  { path: 'look-and-feel', title: 'Look and Feel' },
+  { path: 'data-and-storage', title: 'Data and Storage' },
+  { path: 'tests', title: 'Tests' },
+];
+
+const STARTER_OVERVIEW = `# New Project
 
 Describe your app idea below. Manifex will work with you to plan the documentation structure, then generate thorough technical docs covering architecture, pages, data models, and visual design. Once the documentation is complete, build your app with one click.
 
@@ -36,13 +47,18 @@ Describe your app idea below. Manifex will work with you to plan the documentati
 - **Who uses it** — the target audience or user roles
 - **What it does** — the core functionality and purpose
 - **Key features** — the main capabilities you need
-- **Design preferences** — any style, layout, or branding direction`,
-  },
-};
+- **Design preferences** — any style, layout, or branding direction`;
 
-export const STARTER_TREE: TreeNode[] = [
-  { path: 'overview', title: 'Overview' },
-];
+function starterStub(title: string): string {
+  return `# ${title}\n\n(empty — this page has not been written yet)\n`;
+}
+
+export const STARTER_PAGES: { [path: string]: DocPage } = Object.fromEntries(
+  STARTER_TREE.map(({ path, title }) => [
+    path,
+    { title, content: path === 'overview' ? STARTER_OVERVIEW : starterStub(title) },
+  ]),
+);
 
 export function makeManifestState(pages: { [path: string]: DocPage }, tree: TreeNode[]): ManifestState {
   return {
