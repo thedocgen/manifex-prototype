@@ -347,6 +347,333 @@ async function handleExec(req, res) {
   });
 }
 
+// ==== /agent/task/* — background task primitives =========================
+//
+// This box runs a plain Node service — NO LLM, NO Anthropic API, NO Claude
+// SDK. All intelligence lives server-side in Manifex; the box service just
+// receives task definitions over HTTP and spawns them as child processes.
+// The /agent/ URL namespace is naming convention only (agent task = task
+// the agent system delegated to this box) — no inference happens here.
+//
+// Long-running commands (e.g. `npm ci`) can exceed Fly's ~5-min HTTP edge
+// proxy ceiling, so /__exec isn't usable end-to-end for slow installs. The
+// task protocol decouples the HTTP surface from the child process: every
+// call to this service is short, and a spawned command runs independently
+// of whichever HTTP request kicked it off.
+//
+// Lifecycle:
+//   POST /agent/task/run           → { task_id, started_at }  (immediate)
+//   GET  /agent/task/{id}          → status snapshot
+//   GET  /agent/task/{id}/events   → SSE stream of stdout/stderr + terminal
+//   POST /agent/task/{id}/cancel   → SIGTERM + SIGKILL-after-5s
+//   GET  /agent/tasks              → list of in-memory tasks
+//
+// Each task dir (/tmp/agent-tasks/<id>/) holds stdout.log, stderr.log,
+// meta.json. meta.json is the post-restart source of truth: if the agent
+// is restarted mid-task, /agent/task/{id} reads it and reports
+// state='unknown' (child process is gone, logs remain). v1 doesn't try to
+// resurrect or clean up old task dirs — tasks accumulate until the machine
+// is destroyed, which is per-session anyway.
+
+const TASK_ROOT = '/tmp/agent-tasks';
+const TASK_ID_RE = /^[a-f0-9]{16}$/;
+const TASK_REPLAY_CAP_BYTES = 256 * 1024; // in-memory replay buffer per task
+
+const tasks = new Map(); // task_id → runtime task record (see newTask())
+
+try { fs.mkdirSync(TASK_ROOT, { recursive: true }); } catch {}
+
+function newTaskId() {
+  return crypto.randomBytes(8).toString('hex'); // 16 hex chars
+}
+
+function appendReplay(task, kind, chunk) {
+  task.replay.push({ kind, chunk });
+  task.replayBytes += chunk.length;
+  while (task.replayBytes > TASK_REPLAY_CAP_BYTES && task.replay.length > 0) {
+    const dropped = task.replay.shift();
+    task.replayBytes -= dropped.chunk.length;
+  }
+}
+
+function emitToSubs(task, kind, chunk) {
+  const payload = `data: ${JSON.stringify({ kind, chunk })}\n\n`;
+  for (const res of task.subs) {
+    try { res.write(payload); } catch {}
+  }
+}
+
+function emitTerminalToSubs(task) {
+  const kind = task.state === 'canceled' ? 'canceled' : 'done';
+  const payload = `data: ${JSON.stringify({
+    kind,
+    exit_code: task.exit_code,
+    signal: task.signal,
+  })}\n\n`;
+  for (const res of task.subs) {
+    try { res.write(payload); res.end(); } catch {}
+  }
+  task.subs.clear();
+}
+
+async function writeTaskMeta(task) {
+  const meta = {
+    id: task.id,
+    pid: task.pid,
+    state: task.state,
+    cmd: task.cmd,
+    workdir: task.workdir,
+    env: task.env,
+    started_at: task.started_at,
+    finished_at: task.finished_at,
+    exit_code: task.exit_code,
+    signal: task.signal,
+  };
+  try {
+    await fsp.writeFile(task.metaPath, JSON.stringify(meta, null, 2) + '\n', 'utf8');
+  } catch {}
+}
+
+async function loadTaskMetaFromDisk(id) {
+  try {
+    const raw = await fsp.readFile(path.join(TASK_ROOT, id, 'meta.json'), 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function cancelTask(task) {
+  if (task.state !== 'running') return;
+  try { task.child.kill('SIGTERM'); } catch {}
+  // If the child hasn't died in 5s, escalate. We do NOT change state to
+  // 'canceled' yet — the exit handler does that when the process actually
+  // exits, so status/events reflect reality rather than intent.
+  task.killTimeout = setTimeout(() => {
+    try { task.child.kill('SIGKILL'); } catch {}
+  }, 5000);
+}
+
+async function handleTaskRun(req, res) {
+  let payload;
+  try {
+    const body = await readBody(req, 256 * 1024);
+    payload = JSON.parse(body);
+  } catch (e) {
+    return jsonResponse(res, 400, { error: `invalid body: ${e.message}` });
+  }
+  const { cmd, workdir, env, timeout_s } = payload || {};
+  if (typeof cmd !== 'string' || !cmd.trim()) {
+    return jsonResponse(res, 400, { error: 'cmd (non-empty string) required' });
+  }
+  const childCwd = workdir || WORKSPACE;
+  const childEnv = { ...process.env, ...(env || {}) };
+
+  const id = newTaskId();
+  const dir = path.join(TASK_ROOT, id);
+  try {
+    await fsp.mkdir(dir, { recursive: true });
+  } catch (e) {
+    return jsonResponse(res, 500, { error: `mkdir task dir: ${e.message}` });
+  }
+  const stdoutPath = path.join(dir, 'stdout.log');
+  const stderrPath = path.join(dir, 'stderr.log');
+  const metaPath = path.join(dir, 'meta.json');
+  const stdoutStream = fs.createWriteStream(stdoutPath, { flags: 'w' });
+  const stderrStream = fs.createWriteStream(stderrPath, { flags: 'w' });
+
+  const started_at = new Date().toISOString();
+  const child = spawn('bash', ['-lc', cmd], {
+    cwd: childCwd,
+    env: childEnv,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const task = {
+    id,
+    pid: child.pid,
+    state: 'running',
+    cmd,
+    workdir: childCwd,
+    env: env || {},
+    started_at,
+    finished_at: null,
+    exit_code: null,
+    signal: null,
+    child,
+    subs: new Set(),
+    replay: [],
+    replayBytes: 0,
+    stdoutBytes: 0,
+    stderrBytes: 0,
+    stdoutStream,
+    stderrStream,
+    metaPath,
+    timeoutHandle: null,
+    killTimeout: null,
+  };
+  tasks.set(id, task);
+
+  child.stdout.on('data', d => {
+    const s = d.toString('utf8');
+    task.stdoutBytes += s.length;
+    appendReplay(task, 'stdout', s);
+    try { stdoutStream.write(s); } catch {}
+    emitToSubs(task, 'stdout', s);
+  });
+  child.stderr.on('data', d => {
+    const s = d.toString('utf8');
+    task.stderrBytes += s.length;
+    appendReplay(task, 'stderr', s);
+    try { stderrStream.write(s); } catch {}
+    emitToSubs(task, 'stderr', s);
+  });
+
+  child.on('exit', (code, signal) => {
+    task.finished_at = new Date().toISOString();
+    task.exit_code = code;
+    task.signal = signal;
+    // If we SIGTERM'd/SIGKILL'd via cancelTask (killTimeout set), mark
+    // canceled. Otherwise mark done regardless of exit code — a non-zero
+    // exit is still "done", the caller reads exit_code.
+    if (task.killTimeout) {
+      task.state = 'canceled';
+      clearTimeout(task.killTimeout);
+      task.killTimeout = null;
+    } else {
+      task.state = 'done';
+    }
+    try { stdoutStream.end(); } catch {}
+    try { stderrStream.end(); } catch {}
+    if (task.timeoutHandle) {
+      clearTimeout(task.timeoutHandle);
+      task.timeoutHandle = null;
+    }
+    writeTaskMeta(task);
+    emitTerminalToSubs(task);
+  });
+
+  if (Number.isFinite(timeout_s) && timeout_s > 0) {
+    task.timeoutHandle = setTimeout(() => {
+      if (task.state === 'running') cancelTask(task);
+    }, timeout_s * 1000);
+  }
+
+  await writeTaskMeta(task);
+  return jsonResponse(res, 200, { task_id: id, started_at });
+}
+
+async function handleTaskStatus(req, res, id) {
+  const task = tasks.get(id);
+  if (task) {
+    return jsonResponse(res, 200, {
+      id: task.id,
+      state: task.state,
+      pid: task.pid,
+      exit_code: task.exit_code,
+      signal: task.signal,
+      started_at: task.started_at,
+      finished_at: task.finished_at,
+      stdout_bytes: task.stdoutBytes,
+      stderr_bytes: task.stderrBytes,
+    });
+  }
+  const meta = await loadTaskMetaFromDisk(id);
+  if (!meta) return jsonResponse(res, 404, { error: 'task not found' });
+  // Agent was restarted; the child process is gone. Report 'unknown' for
+  // tasks that were 'running' at meta write time — caller shouldn't
+  // interpret that as in-progress.
+  return jsonResponse(res, 200, {
+    id: meta.id,
+    state: meta.state === 'running' ? 'unknown' : meta.state,
+    pid: meta.pid,
+    exit_code: meta.exit_code,
+    signal: meta.signal,
+    started_at: meta.started_at,
+    finished_at: meta.finished_at,
+    stdout_bytes: 0,
+    stderr_bytes: 0,
+  });
+}
+
+async function handleTaskEvents(req, res, id) {
+  const task = tasks.get(id);
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache, no-transform',
+    'connection': 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+  res.write(': connected\n\n');
+
+  if (!task) {
+    // Agent restart case or unknown id — replay from disk if it exists.
+    const stdoutBuf = await fsp.readFile(path.join(TASK_ROOT, id, 'stdout.log'), 'utf8').catch(() => null);
+    const stderrBuf = await fsp.readFile(path.join(TASK_ROOT, id, 'stderr.log'), 'utf8').catch(() => null);
+    const meta = await loadTaskMetaFromDisk(id);
+    if (stdoutBuf === null && stderrBuf === null && !meta) {
+      res.write(`data: ${JSON.stringify({ kind: 'error', message: 'task not found' })}\n\n`);
+      try { res.end(); } catch {}
+      return;
+    }
+    if (stdoutBuf) res.write(`data: ${JSON.stringify({ kind: 'stdout', chunk: stdoutBuf })}\n\n`);
+    if (stderrBuf) res.write(`data: ${JSON.stringify({ kind: 'stderr', chunk: stderrBuf })}\n\n`);
+    if (meta) {
+      const kind = meta.state === 'canceled' ? 'canceled' : 'done';
+      res.write(`data: ${JSON.stringify({ kind, exit_code: meta.exit_code, signal: meta.signal })}\n\n`);
+    }
+    try { res.end(); } catch {}
+    return;
+  }
+
+  // In-memory task: replay the bounded in-memory log (synchronous), then
+  // subscribe for live chunks. Synchronous sequencing guarantees no child
+  // 'data' handler fires between snapshot and subscribe — the event loop
+  // delivers both on future ticks. A new sub therefore sees every byte
+  // from the replay snapshot forward with no duplicates or gaps.
+  for (const entry of task.replay) {
+    res.write(`data: ${JSON.stringify(entry)}\n\n`);
+  }
+  if (task.state !== 'running') {
+    // Task already finished before SSE arrived — send terminal and close.
+    const kind = task.state === 'canceled' ? 'canceled' : 'done';
+    res.write(`data: ${JSON.stringify({ kind, exit_code: task.exit_code, signal: task.signal })}\n\n`);
+    try { res.end(); } catch {}
+    return;
+  }
+  task.subs.add(res);
+  req.on('close', () => task.subs.delete(res));
+}
+
+async function handleTaskCancel(req, res, id) {
+  const task = tasks.get(id);
+  if (!task) return jsonResponse(res, 404, { error: 'task not found' });
+  if (task.state !== 'running') {
+    return jsonResponse(res, 200, { ok: true, already: task.state });
+  }
+  cancelTask(task);
+  return jsonResponse(res, 200, { ok: true, state: 'canceling' });
+}
+
+function handleTaskList(req, res) {
+  const out = [];
+  for (const task of tasks.values()) {
+    out.push({
+      id: task.id,
+      pid: task.pid,
+      state: task.state,
+      cmd: task.cmd,
+      started_at: task.started_at,
+      finished_at: task.finished_at,
+      exit_code: task.exit_code,
+      signal: task.signal,
+      stdout_bytes: task.stdoutBytes,
+      stderr_bytes: task.stderrBytes,
+    });
+  }
+  return jsonResponse(res, 200, { tasks: out });
+}
+
 // ---- /__logs (SSE) -------------------------------------------------------
 function handleLogs(req, res) {
   res.writeHead(200, {
@@ -470,16 +797,37 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // Strip query string for path-based matching; preserves req.url for
+  // downstream proxy use.
+  const pathOnly = url.split('?')[0];
+
   try {
-    if (url === '/__files' && method === 'POST') return await handleFiles(req, res);
-    if (url === '/__write' && method === 'POST') return await handleWrite(req, res);
-    if (url === '/__read' && method === 'POST') return await handleRead(req, res);
-    if (url === '/__ls' && method === 'POST') return await handleLs(req, res);
-    if (url === '/__exec' && method === 'POST') return await handleExec(req, res);
-    if (url === '/__logs' && method === 'GET') return handleLogs(req, res);
-    if (url === '/__events' && method === 'GET') return handleEvents(req, res);
-    if (url === '/__reload' && method === 'POST') return handleEventTrigger(req, res);
-    if (url === '/__health' && method === 'GET') return handleHealth(req, res);
+    if (pathOnly === '/__files' && method === 'POST') return await handleFiles(req, res);
+    if (pathOnly === '/__write' && method === 'POST') return await handleWrite(req, res);
+    if (pathOnly === '/__read' && method === 'POST') return await handleRead(req, res);
+    if (pathOnly === '/__ls' && method === 'POST') return await handleLs(req, res);
+    if (pathOnly === '/__exec' && method === 'POST') return await handleExec(req, res);
+    if (pathOnly === '/__logs' && method === 'GET') return handleLogs(req, res);
+    if (pathOnly === '/__events' && method === 'GET') return handleEvents(req, res);
+    if (pathOnly === '/__reload' && method === 'POST') return handleEventTrigger(req, res);
+    if (pathOnly === '/__health' && method === 'GET') return handleHealth(req, res);
+
+    // /agent/task/* — see task protocol block above.
+    if (pathOnly === '/agent/task/run' && method === 'POST') return await handleTaskRun(req, res);
+    if (pathOnly === '/agent/tasks' && method === 'GET') return handleTaskList(req, res);
+    let tm;
+    tm = /^\/agent\/task\/([a-f0-9]{16})$/.exec(pathOnly);
+    if (tm && method === 'GET') return await handleTaskStatus(req, res, tm[1]);
+    tm = /^\/agent\/task\/([a-f0-9]{16})\/events$/.exec(pathOnly);
+    if (tm && method === 'GET') return await handleTaskEvents(req, res, tm[1]);
+    tm = /^\/agent\/task\/([a-f0-9]{16})\/cancel$/.exec(pathOnly);
+    if (tm && method === 'POST') return await handleTaskCancel(req, res, tm[1]);
+    // Unknown /agent/* — return 404 rather than fall through to the proxy.
+    // Gives clear errors when a client targets a path the agent doesn't
+    // implement instead of silently hitting the user's dev server.
+    if (pathOnly.startsWith('/agent/') || pathOnly === '/agent') {
+      return jsonResponse(res, 404, { error: `agent route not found: ${method} ${pathOnly}` });
+    }
 
     // Anything else proxies to the user's dev server. Strip the agent CORS
     // headers first so user-app responses don't pretend to be CORS-open.

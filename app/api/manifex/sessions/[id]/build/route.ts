@@ -1,5 +1,6 @@
 import { getSession } from '@/lib/store';
 import type { ManifexSession } from '@/lib/types';
+import { createClient as createSupabaseClient } from '@supabase/supabase-js';
 
 // Phase A3: routes to pre-warm after the dev server is up but BEFORE
 // emitting the 'done' event. Sequential (not parallel) to stay under
@@ -9,6 +10,23 @@ import type { ManifexSession } from '@/lib/types';
 // after the editor iframe loads.
 const PREWARM_ROUTES = ['/', '/api/manifex/projects', '/_not-found'];
 const PREWARM_ROUTE_TIMEOUT_MS = 90_000;
+
+// Compilation row lookup for the DB→devbox materialize step (see below).
+// Must match the compiler_version that seed-compilation.mjs + the Manidex
+// /generate path write under. The two magic metadata keys are skipped —
+// they're not real files. Everything else in codex_files is materialized
+// to /app/workspace on the devbox before setup.sh/run.sh run.
+const MANIDEX_COMPILER_VERSION = 'manidex-claude-agent-sdk-v3';
+const MANIDEX_STATE_SNAPSHOT_KEY = '__manidex_state_snapshot__';
+const MANIDEX_PAGE_FILES_MAP_KEY = '__manidex_page_files_map__';
+
+function supabaseAdmin() {
+  return createSupabaseClient(
+    process.env.SUPABASE_PROJECT_URL || '',
+    process.env.SUPABASE_SERVICE_KEY || '',
+    { auth: { persistSession: false } },
+  );
+}
 
 // Phase 2C split — /build (pure bash, NO Claude).
 //
@@ -95,6 +113,125 @@ async function exec(
   };
 }
 
+// ---- /agent/task/* client ----------------------------------------------
+//
+// Gate 3: long-running commands (setup.sh = npm ci, run.sh = detached dev
+// server launcher) go through the box's background-task protocol instead
+// of a single long-lived /__exec HTTP call, which Fly's edge proxy kills
+// around the 5-min mark. The helper POSTs /agent/task/run to spawn, then
+// subscribes to /agent/task/{id}/events (SSE) and forwards stdout/stderr
+// chunks to the caller via onStdout/onStderr. Resolves when the stream
+// emits a terminal 'done' or 'canceled' event.
+//
+// timeoutMs is a wall-clock watchdog on the SSE connection, NOT on the
+// box child: the box task keeps running even if the SSE aborts. If the
+// watchdog fires before a terminal event arrives, the helper throws and
+// leaves the task orphaned on the box (reachable later via /agent/tasks).
+
+interface AgentTaskResult {
+  task_id: string;
+  exit_code: number | null;
+  signal: string | null;
+  canceled: boolean;
+  started_at: string;
+  duration_ms: number;
+}
+
+async function runAgentTask(
+  base: string,
+  cmd: string,
+  onStdout: (chunk: string) => void,
+  onStderr: (chunk: string) => void,
+  opts: { timeoutMs?: number } = {},
+): Promise<AgentTaskResult> {
+  const started = Date.now();
+  const kickRes = await fetch(`${base}/agent/task/run`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cmd }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!kickRes.ok) {
+    const t = await kickRes.text().catch(() => '');
+    throw new Error(`/agent/task/run ${kickRes.status}: ${t.slice(0, 200)}`);
+  }
+  const kick = await kickRes.json() as { task_id: string; started_at: string };
+
+  const eventsCtrl = new AbortController();
+  const watchdog = opts.timeoutMs
+    ? setTimeout(() => eventsCtrl.abort(), opts.timeoutMs)
+    : null;
+  const eventsRes = await fetch(`${base}/agent/task/${kick.task_id}/events`, {
+    headers: { 'accept': 'text/event-stream' },
+    signal: eventsCtrl.signal,
+  });
+  if (!eventsRes.ok || !eventsRes.body) {
+    if (watchdog) clearTimeout(watchdog);
+    throw new Error(`/agent/task/${kick.task_id}/events ${eventsRes.status}`);
+  }
+
+  const reader = eventsRes.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  let exit_code: number | null = null;
+  let signal: string | null = null;
+  let canceled = false;
+  let terminal = false;
+
+  try {
+    while (!terminal) {
+      let chunkRead;
+      try {
+        chunkRead = await reader.read();
+      } catch {
+        break; // watchdog abort or network drop
+      }
+      if (chunkRead.done) break;
+      buf += dec.decode(chunkRead.value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        const dm = block.match(/^data:\s*(.+)$/m);
+        if (!dm) continue;
+        let payload: { kind?: string; chunk?: string; exit_code?: number | null; signal?: string | null } | null = null;
+        try { payload = JSON.parse(dm[1]); } catch { continue; }
+        if (!payload || typeof payload.kind !== 'string') continue;
+        if (payload.kind === 'stdout' && typeof payload.chunk === 'string') {
+          onStdout(payload.chunk);
+        } else if (payload.kind === 'stderr' && typeof payload.chunk === 'string') {
+          onStderr(payload.chunk);
+        } else if (payload.kind === 'done') {
+          exit_code = typeof payload.exit_code === 'number' ? payload.exit_code : null;
+          signal = typeof payload.signal === 'string' ? payload.signal : null;
+          terminal = true;
+          break;
+        } else if (payload.kind === 'canceled') {
+          exit_code = typeof payload.exit_code === 'number' ? payload.exit_code : null;
+          signal = typeof payload.signal === 'string' ? payload.signal : null;
+          canceled = true;
+          terminal = true;
+          break;
+        }
+      }
+    }
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
+    try { await reader.cancel(); } catch {}
+  }
+  if (!terminal) {
+    throw new Error(`agent task ${kick.task_id} did not reach terminal state (timeout or stream closed)`);
+  }
+  return {
+    task_id: kick.task_id,
+    exit_code,
+    signal,
+    canceled,
+    started_at: kick.started_at,
+    duration_ms: Date.now() - started,
+  };
+}
+
 export async function POST(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
   const session = await getSession(id);
@@ -118,6 +255,69 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       const base = devbox.url.replace(/\/+$/, '');
       emit('start', { devbox_url: devbox.url, manifest_sha });
       try {
+        // ---- Materialize codex_files onto the devbox ------------------
+        // Read the current compilation row by (manifest_sha, compiler_version)
+        // and POST each entry to <devbox>/__write. Reserved __manifex/ keys
+        // map to workspace-root paths (setup.sh, run.sh, .manifex-port); all
+        // other keys write verbatim. Two magic metadata keys are skipped.
+        // Makes cache-hit flows work identically to agent-run flows —
+        // either way, the devbox ends up populated before setup.sh runs.
+        // If no compilation row exists, we skip materialize and fall through
+        // to the existing precheck (which errors with "Run /generate first").
+        const { data: compRow, error: compErr } = await supabaseAdmin()
+          .from('manifex_compilations')
+          .select('codex_files')
+          .eq('manifest_sha', manifest_sha)
+          .eq('compiler_version', MANIDEX_COMPILER_VERSION)
+          .maybeSingle();
+        if (compErr) {
+          emit('error', { stage: 'materialize', message: `compilation lookup failed: ${compErr.message}` });
+          return;
+        }
+        if (compRow?.codex_files) {
+          const files = compRow.codex_files as Record<string, unknown>;
+          const entries: Array<[string, string]> = [];
+          for (const [key, value] of Object.entries(files)) {
+            if (key === MANIDEX_STATE_SNAPSHOT_KEY) continue;
+            if (key === MANIDEX_PAGE_FILES_MAP_KEY) continue;
+            if (typeof value !== 'string') continue;
+            entries.push([key, value]);
+          }
+          const total = entries.length;
+          let written = 0;
+          emit('materialize_start', { total });
+          for (const [key, content] of entries) {
+            let path: string;
+            if (key === '__manifex/setup.sh') path = 'setup.sh';
+            else if (key === '__manifex/run.sh') path = 'run.sh';
+            else if (key === '__manifex/port') path = '.manifex-port';
+            else path = key;
+            try {
+              const writeRes = await fetch(`${base}/__write`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ path, content }),
+                signal: AbortSignal.timeout(30_000),
+              });
+              if (!writeRes.ok) {
+                const txt = await writeRes.text().catch(() => '');
+                emit('error', {
+                  stage: 'materialize',
+                  message: `POST /__write ${path} returned ${writeRes.status}: ${txt.slice(0, 200)}`,
+                });
+                return;
+              }
+            } catch (e: unknown) {
+              const msg = e instanceof Error ? e.message : String(e);
+              emit('error', { stage: 'materialize', message: `POST /__write ${path} failed: ${msg}` });
+              return;
+            }
+            written++;
+            emit('materialize_progress', { written, total, path });
+          }
+          emit('materialize_done', { written, total });
+        }
+
         // ---- Precheck: setup.sh + run.sh must exist -------------------
         const check = await exec(base, 'test -f /app/workspace/setup.sh && test -f /app/workspace/run.sh && echo OK || echo MISSING', { timeoutMs: 10_000 });
         if (!check.stdout.includes('OK')) {
@@ -128,22 +328,75 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
           return;
         }
 
-        // ---- setup.sh (blocking) --------------------------------------
+        // ---- setup.sh (via /agent/task/*) -----------------------------
+        // setup.sh can be long (npm ci on cold deps ≈ 3-4 min), which is
+        // right at Fly's ~5-min HTTP edge-proxy limit. Route it through
+        // the agent task protocol so the box child outlives our SSE
+        // connection, and translate stdout/stderr chunks back onto the
+        // /build SSE contract (setup_stdout / setup_stderr / setup_exit)
+        // so the editor doesn't notice the change of underlying transport.
         emit('setup_started', {});
-        const setup = await exec(base, 'bash /app/workspace/setup.sh 2>&1', { timeoutMs: 540_000 });
-        if (setup.stdout) emit('setup_stdout', { chunk: setup.stdout.slice(-8000) });
-        if (setup.stderr) emit('setup_stderr', { chunk: setup.stderr.slice(-8000) });
-        emit('setup_exit', { exit_code: setup.exit_code, duration_ms: setup.duration_ms });
-        if (!setup.ok) {
-          emit('error', { stage: 'setup', message: `setup.sh exited ${setup.exit_code}` });
+        let setupResult;
+        try {
+          setupResult = await runAgentTask(
+            base,
+            'bash /app/workspace/setup.sh',
+            chunk => emit('setup_stdout', { chunk }),
+            chunk => emit('setup_stderr', { chunk }),
+            { timeoutMs: 15 * 60 * 1000 },
+          );
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          emit('error', { stage: 'setup', message: `agent task error: ${msg}` });
+          return;
+        }
+        emit('setup_exit', {
+          exit_code: setupResult.exit_code,
+          signal: setupResult.signal,
+          duration_ms: setupResult.duration_ms,
+          task_id: setupResult.task_id,
+        });
+        if (setupResult.canceled || setupResult.exit_code !== 0) {
+          emit('error', {
+            stage: 'setup',
+            message: setupResult.canceled
+              ? `setup.sh canceled (signal=${setupResult.signal ?? 'unknown'})`
+              : `setup.sh exited ${setupResult.exit_code}`,
+          });
           return;
         }
 
-        // ---- run.sh (detach) ------------------------------------------
-        const run = await exec(base, 'bash /app/workspace/run.sh', { detach: true, timeoutMs: 30_000 });
-        emit('run_started', { pid: run.pid });
-        if (!run.ok && !run.detached) {
-          emit('error', { stage: 'run', message: 'run.sh spawn failed' });
+        // ---- run.sh (via /agent/task/*) -------------------------------
+        // run.sh itself is fast (nohup launch + disown + exit 0 ≤ 1s) —
+        // the long-lived dev server is a grand-child of this task and
+        // keeps running after the task terminates. We use /agent/task/run
+        // here instead of /__exec's detach:true so both phases share one
+        // transport. SSE terminal 'done' arrives once run.sh exits; the
+        // wait_port loop below then polls for the detached dev server.
+        let runResult;
+        try {
+          runResult = await runAgentTask(
+            base,
+            'bash /app/workspace/run.sh',
+            () => {},
+            () => {},
+            { timeoutMs: 60_000 },
+          );
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          emit('error', { stage: 'run', message: `agent task error: ${msg}` });
+          return;
+        }
+        emit('run_started', {
+          task_id: runResult.task_id,
+          exit_code: runResult.exit_code,
+          signal: runResult.signal,
+        });
+        if (runResult.canceled || runResult.exit_code !== 0) {
+          emit('error', {
+            stage: 'run',
+            message: `run.sh exited ${runResult.exit_code ?? 'null'} (signal=${runResult.signal ?? 'null'})`,
+          });
           return;
         }
 

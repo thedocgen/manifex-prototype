@@ -340,13 +340,20 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
           );
           console.log(`[generate:manidex] A2 hashes: seeded=${seededHash?.slice(0, 12) || 'null'} prompt=${promptHash.slice(0, 12)} incremental=${willBeIncremental}`);
 
-          // ─── A2: cache probe with composite key ───
+          // ─── Cache probe ───
+          // prompt_version_hash is intentionally NOT in the lookup constraints.
+          // manifest_sha already encodes the doc content — if docs haven't
+          // changed, Build should cache-hit regardless of which agent version
+          // or prompt variant was used the last time. prompt_version_hash is
+          // still recorded on the row (see upsert below) and selected here for
+          // diagnostics / forensics, but it does NOT gate cache validity.
+          // Click Build with no doc changes → straight cache-hit → materialize
+          // → deploy. Agent runs ONLY when docs actually diffed.
           let cacheQuery = supabaseAdmin()
             .from('manifex_compilations')
             .select('manifest_sha,compiler_version,created_at,codex_files,seeded_codex_hash,prompt_version_hash')
             .eq('manifest_sha', manifest_sha)
-            .eq('compiler_version', MANIDEX_COMPILER_VERSION)
-            .eq('prompt_version_hash', promptHash);
+            .eq('compiler_version', MANIDEX_COMPILER_VERSION);
           if (seededHash === null) {
             cacheQuery = cacheQuery.is('seeded_codex_hash', null);
           } else {
@@ -514,13 +521,99 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     }), { status: 409, headers: { 'content-type': 'application/json' } });
   }
 
-  // Phase 2C generate-cache: look up prior commit sha for this manifest_sha.
+  // Unified cache probe: mirror the claude-agent-sdk path's manifex_compilations
+  // lookup (route.ts ~270-358) so both backends share one cache source. When the
+  // probe hits, emit start/cache_hit/done and return — /build's materialize step
+  // will read the SAME row from manifex_compilations and POST files to the devbox
+  // via /__write, no git-checkout needed. Hash inputs match the Manidex path
+  // exactly so a row seeded there hits here.
+  let unifiedCacheHit: null | {
+    file_count: number;
+    total_bytes: number;
+    at: string;
+    age_ms: number;
+    seeded_codex_hash: string | null;
+    prompt_version_hash: string;
+  } = null;
+  try {
+    // Previous-compilation lookup (needed for seededHash computation).
+    const { data: prevRows } = await supabaseAdmin()
+      .from('manifex_compilations')
+      .select('manifest_sha,compiler_version,created_at,codex_files')
+      .like('compiler_version', 'manidex-claude-agent-sdk-%')
+      .neq('manifest_sha', manifest_sha)
+      .order('created_at', { ascending: false })
+      .limit(1);
+    let previousCodexFiles: Record<string, string> | undefined;
+    let previousPageFilesMap: Record<string, string[]> | undefined;
+    if (prevRows && prevRows[0]?.codex_files) {
+      const prevFiles = prevRows[0].codex_files as Record<string, unknown>;
+      const seededFiles: Record<string, string> = {};
+      for (const [k, v] of Object.entries(prevFiles)) {
+        if (k.startsWith('__manidex_')) continue;
+        if (typeof v === 'string') seededFiles[k] = v;
+      }
+      previousCodexFiles = seededFiles;
+      const mapRaw = prevFiles[MANIDEX_PAGE_FILES_MAP_KEY];
+      if (typeof mapRaw === 'string') {
+        try {
+          const mapParsed = JSON.parse(mapRaw);
+          if (mapParsed && typeof mapParsed === 'object') previousPageFilesMap = mapParsed as Record<string, string[]>;
+        } catch {}
+      }
+    }
+    const { parseRequiredRoutesFromPages } = await import('@/lib/manifest-services');
+    const currentPages = session.manifest_state.pages as Record<string, { title: string; content: string }>;
+    const routesForHash = parseRequiredRoutesFromPages(currentPages).routes;
+    const seededHash = computeSeededCodexHash(previousCodexFiles);
+    const willBeIncremental = !!previousCodexFiles;
+    const promptHash = computePromptVersionHash(
+      willBeIncremental ? 'INCREMENTAL' : 'COLD',
+      routesForHash,
+      previousPageFilesMap,
+    );
+    // prompt_version_hash is intentionally NOT in the lookup constraints —
+    // see the comment on the claude-agent-sdk path's probe above. manifest_sha
+    // encodes doc content; a matching row means docs haven't changed, so the
+    // cached compilation is valid regardless of which prompt variant wrote it.
+    // Still recorded on the row and selected for diagnostics.
+    let cacheQuery = supabaseAdmin()
+      .from('manifex_compilations')
+      .select('manifest_sha,compiler_version,created_at,codex_files,seeded_codex_hash,prompt_version_hash')
+      .eq('manifest_sha', manifest_sha)
+      .eq('compiler_version', MANIDEX_COMPILER_VERSION);
+    if (seededHash === null) {
+      cacheQuery = cacheQuery.is('seeded_codex_hash', null);
+    } else {
+      cacheQuery = cacheQuery.eq('seeded_codex_hash', seededHash);
+    }
+    const { data: existing } = await cacheQuery.maybeSingle();
+    if (existing?.codex_files) {
+      const files = (existing.codex_files as Record<string, unknown>) || {};
+      const fileCount = Object.keys(files).filter((k) => !String(k).startsWith('__manidex_')).length;
+      const totalBytes = Object.values(files).reduce<number>(
+        (a, v) => a + (typeof v === 'string' ? v.length : 0),
+        0,
+      );
+      unifiedCacheHit = {
+        file_count: fileCount,
+        total_bytes: totalBytes,
+        at: existing.created_at as string,
+        age_ms: Date.now() - new Date(existing.created_at as string).getTime(),
+        seeded_codex_hash: seededHash,
+        prompt_version_hash: promptHash,
+      };
+    }
+  } catch (e: any) {
+    console.warn(`[generate:anthropic-sdk] unified cache probe failed: ${e?.message || e}`);
+  }
+
+  // Phase 2C generate-cache (fallback): look up prior commit sha for this manifest_sha.
   // Cache is stored on session.manifest_state.generate_cache as a flat
   // object { [manifest_sha]: { commit_sha, at, duration_ms, iterations } }.
   // Hit → replay the cached commit via `git checkout <sha>` so the
-  // workspace is byte-exact to the last successful generate. Round-trip
-  // determinism depends on this — revert the doc, get the same commit back,
-  // /build replays the same code.
+  // workspace is byte-exact to the last successful generate. Retained for
+  // backwards compat when no manifex_compilations row matches.
   const cacheMap = (session.manifest_state as any)?.generate_cache || {};
   const cached = cacheMap[manifest_sha];
 
@@ -529,6 +622,45 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
       const emit = (event: string, data: unknown) => {
         try { controller.enqueue(sseEvent(event, data)); } catch {}
       };
+
+      // Unified-cache short-circuit — must come before the old per-session
+      // git-commit cache so both backends agree on the cache source when
+      // both sources exist at the same manifest_sha.
+      if (unifiedCacheHit) {
+        emit('start', {
+          manifest_sha,
+          backend: 'anthropic-sdk',
+          devbox_url: devbox.url,
+          spec_bytes: spec_md.length,
+          cache_hit: true,
+          seeded_codex_hash: unifiedCacheHit.seeded_codex_hash,
+          prompt_version_hash: unifiedCacheHit.prompt_version_hash,
+        });
+        emit('cache_hit', {
+          manifest_sha,
+          compiler_version: MANIDEX_COMPILER_VERSION,
+          file_count: unifiedCacheHit.file_count,
+          total_bytes: unifiedCacheHit.total_bytes,
+          at: unifiedCacheHit.at,
+          age_ms: unifiedCacheHit.age_ms,
+        });
+        emit('done', {
+          backend: 'anthropic-sdk',
+          iterations: 0,
+          duration_ms: 0,
+          final_text: `Cache hit from manifex_compilations — ${unifiedCacheHit.file_count} files, ${unifiedCacheHit.total_bytes} bytes.`,
+          file_count: unifiedCacheHit.file_count,
+          total_bytes: unifiedCacheHit.total_bytes,
+          manifest_sha,
+          compiler_version: MANIDEX_COMPILER_VERSION,
+          cache_hit: true,
+          cached_at: unifiedCacheHit.at,
+          cache_age_ms: unifiedCacheHit.age_ms,
+        });
+        try { controller.close(); } catch {}
+        return;
+      }
+
       emit('start', { manifest_sha, devbox_url: devbox.url, spec_bytes: spec_md.length, cache_hit: !!cached });
 
       try {

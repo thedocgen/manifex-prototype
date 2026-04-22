@@ -47,7 +47,8 @@ Your workflow:
 7. Write a run.sh at /app/workspace/run.sh that a downstream bash runner will execute AFTER setup.sh succeeds. It must: (a) kill any prior dev server (\`pkill -f "next dev" 2>/dev/null || true\`), (b) write the dev server's port to /app/workspace/.manifex-port, (c) start the dev server in the background via \`nohup bash -c "..." > .manifex/dev.log 2>&1 < /dev/null & disown\` so it survives when run.sh exits, (d) return 0 immediately. It must NOT block on the server, must NOT verify with curl.
 8. Write /app/workspace/.manifex/bootstrap.sh with contents \`bash /app/workspace/run.sh\`. This is the script the devbox agent re-execs on machine start when Fly auto-stop has killed the server — it just re-runs run.sh, which is already idempotent.
 9. **Do NOT run setup.sh, run.sh, bash npm install, start the dev server, or touch port 3000 yourself.** You only write files. A pure-bash /build runner on the manifex-wip side takes over once you finish and runs setup.sh + run.sh. If you spawn processes here they'll get killed when the build route kicks its own run.sh.
-10. Finish with a one-sentence text response starting with "BUILD_SUMMARY:" describing what changed.
+10. Before completing the spec, run \`grep -n REQUIRED /app/workspace/.manifex/spec.md\` and ensure every pin (REQUIRED — exact strings, REQUIRED SHAPE, REQUIRED ROUTES, or any other REQUIRED line) is honored in the code you wrote. For each REQUIRED item: identify the target file(s), read them with read_file (let max_bytes default so you see the full file, don't read a tiny head), and confirm the pin is satisfied. If you find a REQUIRED item that isn't yet reflected in the code, edit the relevant file with write_file and re-check. Only proceed to BUILD_SUMMARY when every REQUIRED item is either satisfied in the code or explicitly called out as unsatisfiable in your final_text (with the reason). This scan is non-optional — skipping it means downstream /build ships code that contradicts the docs.
+11. Finish with a one-sentence text response starting with "BUILD_SUMMARY:" describing what changed.
 
 Stack decisions (when not explicitly overridden by the Environment page):
 - Default to Next.js 15 App Router + Tailwind v3 + SQLite + Drizzle ORM. It's what Manifex knows best and what the devbox toolchain is tuned for.
@@ -109,7 +110,7 @@ export const ANTHROPIC_SDK_TOOLS: Anthropic.Messages.Tool[] = [
       type: 'object' as const,
       properties: {
         path: { type: 'string' as const, description: 'File path relative to /app/workspace (no leading slash, no ..)' },
-        max_bytes: { type: 'integer' as const, description: 'Optional read cap (default 1048576). If the file is larger the result is truncated and a truncated flag is set.' },
+        max_bytes: { type: 'integer' as const, description: 'Optional read cap in bytes (default 262144 = 256 KB). OMIT for typical source files — the default is large enough to return complete contents of all-but-the-largest files in one call. Only set explicitly if you know the file exceeds 256 KB and you need a larger slice (max 4 MB). Do NOT pass small values (e.g. 10000) — you will get a truncated head and make spec-honoring edits impossible.' },
       },
       required: ['path' as const],
     },
@@ -216,7 +217,15 @@ export async function execTool(
 
     if (name === 'read_file') {
       const p = typeof input.path === 'string' ? input.path : '';
-      const max_bytes = typeof input.max_bytes === 'number' ? input.max_bytes : undefined;
+      // Default to 256 KB when omitted, and enforce that as a floor even when
+      // the agent passes something smaller. The agent has a habit of asking
+      // for tiny slices (max_bytes: 10000) and then acting on an incomplete
+      // file, which breaks spec-honoring edits on any source >10 KB. Floor
+      // guarantees first-read sees complete contents of typical source files.
+      const MIN_READ_BYTES = 262144;
+      const max_bytes = typeof input.max_bytes === 'number'
+        ? Math.max(input.max_bytes, MIN_READ_BYTES)
+        : MIN_READ_BYTES;
       if (!p) return { ok: false, summary: 'read_file: empty path', content: 'error: path required' };
       const res = await fetch(`${base}/__read`, {
         method: 'POST',
@@ -388,11 +397,11 @@ async function runWithAnthropicSDK(
   const messages: Anthropic.Messages.MessageParam[] = [
     {
       role: 'user',
-      content: `A Manifex documentation spec has been placed at /app/workspace/.manifex/spec.md. Your goal: bring the code in /app/workspace into alignment with that spec. If the workspace is empty, scaffold the project. If it already has code, make the smallest incremental edits.\n\nWrite setup.sh (idempotent installer), run.sh (starts dev server + writes .manifex-port), and .manifex/bootstrap.sh (just 'bash /app/workspace/run.sh'). Do NOT run setup.sh, do NOT run run.sh, do NOT npm install, do NOT start the dev server yourself — a pure-bash /build runner picks those up after you finish. Finish with a one-sentence BUILD_SUMMARY.\n\nmanifest_sha: ${manifestSha}`,
+      content: `A Manifex documentation spec has been placed at /app/workspace/.manifex/spec.md. Your goal: bring the code in /app/workspace into alignment with that spec. If the workspace is empty, scaffold the project. If it already has code, make the smallest incremental edits.\n\nWrite setup.sh (idempotent installer), run.sh (starts dev server + writes .manifex-port), and .manifex/bootstrap.sh (exactly 'bash /app/workspace/setup.sh && bash /app/workspace/run.sh'). The bootstrap.sh chain MUST include setup.sh because only /app/workspace persists across machine restarts — globally-installed binaries (npm install -g X, apt packages, anything under /usr/local) are wiped on restart, so setup.sh must be re-asserted on every boot. Make setup.sh idempotent so this chain is near-zero on warm volumes. Do NOT run setup.sh, do NOT run run.sh, do NOT npm install, do NOT start the dev server yourself — a pure-bash /build runner picks those up after you finish. Finish with a one-sentence BUILD_SUMMARY.\n\nmanifest_sha: ${manifestSha}`,
     },
   ];
 
-  const MAX_ITERATIONS = 60;
+  const MAX_ITERATIONS = 120;
   const started = Date.now();
   let iteration = 0;
   let finalText = '';

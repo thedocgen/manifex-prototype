@@ -13,15 +13,22 @@
 const FLY_API_BASE = 'https://api.machines.dev/v1';
 const FLY_ORG = 'personal';
 const FLY_REGION = 'iad';
-// Phase 2B pivot-back: v3.2-bootstrap is v3.1-lean plus a startup hook
-// that re-execs /app/workspace/.manifex/bootstrap.sh (if present) when
-// the agent boots. Fly's auto_stop_machines setting still takes the
-// machine down on idle, but because the Fly volume preserves the whole
-// workspace across stop/start, the agent restart runs the last
-// recorded launch command and the user's iframe comes back in seconds
-// without a full Claude rebuild. Earlier tags stay in the registry
-// for progressive rollback.
-const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v3.3-inline-output';
+// Tag history (earlier tags stay in the registry for progressive rollback):
+//   v3.1-lean         — stdlib-only service: /__files, /__write, /__exec, …
+//   v3.2-bootstrap    — adds /app/workspace/.manifex/bootstrap.sh re-exec on
+//                       machine start, so Fly's auto_stop_machines doesn't
+//                       lose the dev server across idle cycles.
+//   v3.3-inline-output — /__exec returns stdout/stderr inline in the response
+//                       JSON so callers don't have to tail /__logs after the
+//                       fact (fixed Claude tool_result corruption).
+//   v3.4-agent-tasks  — adds /agent/task/* background-task protocol:
+//                       /agent/task/run (detached spawn), /agent/task/{id}
+//                       (status), SSE /agent/task/{id}/events, /cancel,
+//                       /agent/tasks (list). Solves the Fly HTTP proxy
+//                       ~5-min ceiling for long installs — every HTTP call
+//                       to the box is short; child processes run
+//                       independently of whichever request kicked them off.
+const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v3.4-agent-tasks';
 const APP_PREFIX = 'manifex-app-';
 const MAX_ACTIVE_DEVBOXES = 3;
 

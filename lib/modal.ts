@@ -539,12 +539,79 @@ export async function editManifestShallow(
     throw new Error(`editManifestShallow: emit_shallow_docs missing pages or tree`);
   }
 
-  const pages: { [path: string]: DocPage } = {};
+  // Mirror editManifest's merge logic (see :699-719 above). Shallow's
+  // system prompt instructs the model to emit <300-char stubs for every
+  // page; without a merge step the whole manifest collapses to those
+  // stubs on every prompt-bar edit. Same preserve-unchanged-pages +
+  // length-regression-guard pattern as deep, so the shallow proposed_
+  // manifest is ALWAYS safe for /keep — even if the deep pass later
+  // fails or times out and the recovery path applies this shallow
+  // result as-is.
+  const llmPages: { [path: string]: DocPage } = {};
   for (const [path, page] of Object.entries(input.pages)) {
     if (page && typeof page.title === 'string' && typeof page.content === 'string') {
-      pages[path] = { title: page.title, content: page.content };
+      llmPages[path] = { title: page.title, content: page.content };
     }
   }
+  const claimedChangedShallow = Array.isArray(input.changed_pages) ? input.changed_pages : [];
+  const changedSetShallow = new Set(claimedChangedShallow);
+  const mergedShallow: { [path: string]: DocPage } = {};
+  const preservedPathsShallow: string[] = [];
+  const collapsedPathsShallow: string[] = [];
+
+  // Start from the existing manifest — every current page survives
+  // unless explicitly changed.
+  for (const [path, page] of Object.entries(currentState.pages || {})) {
+    mergedShallow[path] = page;
+  }
+
+  // Apply LLM edits only where it claimed a change.
+  for (const path of Object.keys(llmPages)) {
+    if (changedSetShallow.has(path)) {
+      const incoming = llmPages[path];
+      const existing = currentState.pages?.[path];
+      if (
+        existing &&
+        existing.content.length > 1000 &&
+        incoming.content.length < 300
+      ) {
+        // Stub would collapse a substantial page. Preserve the existing
+        // copy; the shallow UI still gets to show the diff_summary
+        // "Drafting…" prose, and the deep pass will emit the real edit.
+        collapsedPathsShallow.push(path);
+        mergedShallow[path] = existing;
+      } else {
+        mergedShallow[path] = incoming;
+      }
+    } else if (!mergedShallow[path]) {
+      // Brand-new page the LLM emitted but didn't list in changed_pages.
+      // Treat as additive.
+      mergedShallow[path] = llmPages[path];
+    } else {
+      // LLM emitted this page but did NOT claim a change — preserve
+      // existing regardless of what was emitted.
+      preservedPathsShallow.push(path);
+    }
+  }
+
+  // Deletions: paths the LLM listed as changed but didn't emit.
+  for (const path of changedSetShallow) {
+    if (!(path in llmPages)) {
+      delete mergedShallow[path];
+    }
+  }
+
+  if (preservedPathsShallow.length > 0 || collapsedPathsShallow.length > 0) {
+    console.log(
+      `[editManifestShallow] merge protected ${preservedPathsShallow.length} unchanged page(s)` +
+        (preservedPathsShallow.length > 0 ? `: ${preservedPathsShallow.join(', ')}` : '') +
+        (collapsedPathsShallow.length > 0
+          ? ` and rejected ${collapsedPathsShallow.length} length-regression(s): ${collapsedPathsShallow.join(', ')}`
+          : '')
+    );
+  }
+
+  const pages = mergedShallow;
 
   function validateTree(nodes: any[]): TreeNode[] {
     return nodes
