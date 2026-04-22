@@ -28,7 +28,14 @@ const FLY_REGION = 'iad';
 //                       ~5-min ceiling for long installs — every HTTP call
 //                       to the box is short; child processes run
 //                       independently of whichever request kicked them off.
-const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v3.4-agent-tasks';
+//   v3.5-dev-running-probe — /__health.dev_running now reflects the
+//                       authoritative signal: a TCP probe on 127.0.0.1:<dev_port>.
+//                       Previously only tracked runningProc (from /__exec
+//                       detach:true), which never saw the nohup-detached
+//                       dev server that /agent/task/run spawns via run.sh.
+//                       Consumers of dev_running (editor overlay, lib/devbox
+//                       deploy poll) now get correct readiness signal.
+const DEVBOX_IMAGE = 'registry.fly.io/manifex-devbox-image:v3.5-dev-running-probe';
 const APP_PREFIX = 'manifex-app-';
 const MAX_ACTIVE_DEVBOXES = 3;
 

@@ -38,6 +38,7 @@ const fs = require('fs');
 const fsp = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
+const net = require('net');
 const { spawn } = require('child_process');
 
 const PORT = parseInt(process.env.AGENT_PORT || process.env.PORT || '8080', 10);
@@ -721,13 +722,56 @@ function readDevPort() {
   return DEFAULT_DEV_PORT;
 }
 
-function handleHealth(req, res) {
+// Probe 127.0.0.1:<port> with a short TCP connect. Resolves true when the
+// socket accepts, false on any error or timeout. Used as the authoritative
+// dev-server signal — the user's dev server is typically a nohup grandchild
+// of a run.sh task and is NOT tracked in `runningProc` or the task map, so
+// neither of those signals reflects whether the dev server is actually up.
+function portListening(port, timeoutMs = 500) {
+  return new Promise(resolve => {
+    const s = net.createConnection({ host: '127.0.0.1', port });
+    let settled = false;
+    const done = ok => {
+      if (settled) return;
+      settled = true;
+      try { s.destroy(); } catch {}
+      resolve(ok);
+    };
+    s.once('connect', () => done(true));
+    s.once('error', () => done(false));
+    setTimeout(() => done(false), timeoutMs);
+  });
+}
+
+async function handleHealth(req, res) {
+  const devPort = readDevPort();
+  // dev_running is TRUE when any of:
+  //   (a) something is listening on dev_port — authoritative proof the dev
+  //       server is up and accepting connections. The dev server is usually
+  //       a nohup-detached grandchild of a run.sh task (next dev via
+  //       `nohup bash -c "npm run dev" & disown`), so it doesn't appear in
+  //       runningProc OR the task map. Port check is the only reliable
+  //       signal once run.sh has exited and the grandchild is flying solo.
+  //   (b) runningProc != null — legacy path for /__exec detach:true.
+  //   (c) any /agent/task/run task is currently state='running' — covers
+  //       the narrow window between task spawn and (a) becoming true, so
+  //       /__health doesn't flicker false during startup.
+  let portActive = false;
+  try { portActive = await portListening(devPort); } catch {}
+  let anyTaskRunning = false;
+  for (const t of tasks.values()) {
+    if (t.state === 'running') { anyTaskRunning = true; break; }
+  }
   return jsonResponse(res, 200, {
     ok: true,
-    dev_running: runningProc != null,
-    dev_port: readDevPort(),
+    dev_running: portActive || runningProc != null || anyTaskRunning,
+    dev_port: devPort,
     last_exit: lastExit,
     log_bytes: logBuffer.length,
+    // Breakdown for diagnostics — lets callers distinguish "port actually
+    // open" from "a task is spawning".
+    dev_port_active: portActive,
+    task_running: anyTaskRunning,
   });
 }
 
@@ -810,7 +854,7 @@ const server = http.createServer(async (req, res) => {
     if (pathOnly === '/__logs' && method === 'GET') return handleLogs(req, res);
     if (pathOnly === '/__events' && method === 'GET') return handleEvents(req, res);
     if (pathOnly === '/__reload' && method === 'POST') return handleEventTrigger(req, res);
-    if (pathOnly === '/__health' && method === 'GET') return handleHealth(req, res);
+    if (pathOnly === '/__health' && method === 'GET') return await handleHealth(req, res);
 
     // /agent/task/* — see task protocol block above.
     if (pathOnly === '/agent/task/run' && method === 'POST') return await handleTaskRun(req, res);
