@@ -123,6 +123,74 @@ function sseEvent(event: string, data: unknown): Uint8Array {
 // route keeps the devbox git + cache + SSE plumbing and delegates the
 // Claude call to runBuildAgent().
 
+// Walk the devbox's /app/workspace and pack every non-binary source file
+// into a { path: content } map suitable for manifex_compilations. Uses
+// /__exec for a single find to get the file list, then parallel /__read
+// calls. Skips the usual noise dirs (node_modules, .git, .next, build
+// artefacts, lost+found), .env* secrets, binary files, and files ≥2 MB
+// (matches the box's /__read cap and seed-compilation.mjs invariants).
+// All returned paths are relative to /app/workspace, no leading slash.
+async function packDevboxWorkspace(devboxUrl: string): Promise<Record<string, string>> {
+  const base = devboxUrl.replace(/\/+$/, '');
+  const findCmd = [
+    'cd /app/workspace',
+    'find . -type f',
+    "! -path './node_modules/*'",
+    "! -path './.git/*'",
+    "! -path './.next/*'",
+    "! -path './.turbo/*'",
+    "! -path './.vercel/*'",
+    "! -path './.cache/*'",
+    "! -path './lost+found/*'",
+    "! -path './dist/*'",
+    "! -path './build/*'",
+    "! -path './out/*'",
+    '! -name .DS_Store',
+    '! -name Thumbs.db',
+    '! -name .manifex-port',
+    '-size -2M',
+  ].join(' ');
+  const findRes = await fetch(`${base}/__exec`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ cmd: findCmd }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!findRes.ok) throw new Error(`packDevboxWorkspace: find ${findRes.status}`);
+  const findData = await findRes.json() as { exit_code?: number; stdout?: string };
+  if (findData.exit_code !== 0) throw new Error(`packDevboxWorkspace: find exit ${findData.exit_code}`);
+  const paths = (findData.stdout || '')
+    .split('\n')
+    .map(ln => ln.trim().replace(/^\.\//, ''))
+    .filter(Boolean)
+    .filter(p => !p.startsWith('.env')); // never persist secret files
+
+  const out: Record<string, string> = {};
+  const CONCURRENCY = 8;
+  let idx = 0;
+  async function worker() {
+    while (idx < paths.length) {
+      const p = paths[idx++];
+      try {
+        const r = await fetch(`${base}/__read`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ path: p, max_bytes: 2 * 1024 * 1024 }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!r.ok) continue;
+        const data = await r.json() as { exists?: boolean; is_file?: boolean; content?: string };
+        if (!data.exists || !data.is_file || typeof data.content !== 'string') continue;
+        // Cheap binary guard — UTF-8 source files don't contain NUL bytes.
+        if (data.content.indexOf('\x00') >= 0) continue;
+        out[p] = data.content;
+      } catch { /* per-file transient; keep going */ }
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+  return out;
+}
+
 // Run a small bash on the devbox, return stdout + exit code.
 async function devboxBash(devboxUrl: string, cmd: string): Promise<{ exit_code: number; stdout: string; stderr: string }> {
   const base = devboxUrl.replace(/\/+$/, '');
@@ -535,6 +603,12 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
     seeded_codex_hash: string | null;
     prompt_version_hash: string;
   } = null;
+  // Hoisted so the post-agent materialize-clobber fix (inside the stream
+  // handler) can reuse these without recomputing. Assigned inside the
+  // probe's try block below.
+  let hoistedCurrentPages: Record<string, { title: string; content: string }> = session.manifest_state.pages as Record<string, { title: string; content: string }>;
+  let hoistedSeededHash: string | null = null;
+  let hoistedPromptHash: string = '';
   try {
     // Previous-compilation lookup (needed for seededHash computation).
     const { data: prevRows } = await supabaseAdmin()
@@ -572,6 +646,9 @@ export async function POST(_req: Request, { params }: { params: Promise<{ id: st
       routesForHash,
       previousPageFilesMap,
     );
+    hoistedCurrentPages = currentPages;
+    hoistedSeededHash = seededHash;
+    hoistedPromptHash = promptHash;
     // prompt_version_hash is intentionally NOT in the lookup constraints —
     // see the comment on the claude-agent-sdk path's probe above. manifest_sha
     // encodes doc content; a matching row means docs haven't changed, so the
@@ -703,6 +780,46 @@ git clean -qfd
           } catch (e: any) {
             console.warn(`[generate] cache write failed: ${e?.message || e}`);
           }
+        }
+
+        // Materialize-clobber fix: write manifex_compilations from the
+        // devbox's FINAL state (not from prototype source). Prior design
+        // had /render or seed-compilation.mjs populating this row from
+        // the prototype tree, and /build's materialize would then clobber
+        // the agent's edits on the next click. By writing the row here,
+        // the materialize step re-hydrates the same files the agent just
+        // committed — so a no-doc-change re-Build is a cache-hit that
+        // deploys identical state rather than regressing. Hashes
+        // (seeded_codex_hash, prompt_version_hash) were computed above
+        // for the cache probe; reuse them here for consistency.
+        try {
+          const codexFiles = await packDevboxWorkspace(devbox.url);
+          codexFiles[MANIDEX_STATE_SNAPSHOT_KEY] = JSON.stringify(hoistedCurrentPages);
+          const { error: upsertErr } = await supabaseAdmin()
+            .from('manifex_compilations')
+            .upsert(
+              {
+                manifest_sha,
+                compiler_version: MANIDEX_COMPILER_VERSION,
+                codex_files: codexFiles,
+                seeded_codex_hash: hoistedSeededHash,
+                prompt_version_hash: hoistedPromptHash,
+              },
+              { onConflict: 'manifest_sha,compiler_version' },
+            );
+          if (upsertErr) {
+            console.warn(`[generate:anthropic-sdk] compilation upsert failed: ${upsertErr.message}`);
+          } else {
+            const fileCount = Object.keys(codexFiles).filter(k => !k.startsWith('__manidex_')).length;
+            const totalBytes = Object.values(codexFiles).reduce<number>((s, v) => s + (typeof v === 'string' ? v.length : 0), 0);
+            console.log(`[generate:anthropic-sdk] wrote manifex_compilations row: ${fileCount} files, ${totalBytes} bytes`);
+            emit('assistant_text', {
+              iteration: result.iterations,
+              text: `Persisted compilation row from devbox state: ${fileCount} files, ${totalBytes} bytes.`,
+            });
+          }
+        } catch (e: any) {
+          console.warn(`[generate:anthropic-sdk] pack+upsert failed: ${e?.message || e}`);
         }
 
         emit('done', { ...result, commit_sha, cache_hit: false });
